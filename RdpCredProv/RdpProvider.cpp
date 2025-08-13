@@ -833,7 +833,15 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		{
 			size_t password_len = password_end - password_start;
 			log.Write("DEBUG: Extracting password - length: %zu", password_len);
-			MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1));
+			// Calculate max bytes to convert based on buffer size
+			int max_wchars = (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1);
+			// Worst case: each UTF-8 byte could be one WCHAR, so cap input length
+			if ((int)password_len > max_wchars) {
+				log.Write("WARNING: Password length exceeds buffer size, truncating");
+				password_len = max_wchars;
+			}
+			int converted = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, max_wchars);
+			_wszStoredPassword[converted] = L'\0'; // Ensure null-termination
 			int pw_chars = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1));
 			if (pw_chars == 0) {
 				log.Write("ERROR: MultiByteToWideChar failed for password extraction (GetLastError: %lu)", GetLastError());
