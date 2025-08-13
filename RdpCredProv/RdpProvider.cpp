@@ -613,9 +613,10 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 
 	g_log.Write("DEBUG: Successfully sent credential request - %d bytes written", bytesWritten);
 
-	// Read the response with a timeout
+	// Read the response with a timeout and size limit
 	std::string responseBuffer;
 	const DWORD chunkSize = 1024;
+	const DWORD maxResponseSize = 64 * 1024; // 64KB limit for security
 	DWORD bytesRead = 0;
 	char tempBuffer[chunkSize];
 	BOOL readResult = FALSE;
@@ -624,9 +625,15 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		readResult = ReadFile(_hPipe, tempBuffer, chunkSize, &bytesRead, NULL);
 		if (readResult && bytesRead > 0)
 		{
+			// Check size limit to prevent DoS
+			if (responseBuffer.size() + bytesRead > maxResponseSize)
+			{
+				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", maxResponseSize);
+				break;
+			}
 			responseBuffer.append(tempBuffer, bytesRead);
 		}
-	} while (readResult && bytesRead == chunkSize);
+	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < maxResponseSize);
 
 	if (!responseBuffer.empty())
 	{
@@ -709,6 +716,15 @@ void RdpProvider::_CheckForIncomingMessages()
 		return; // No data available
 	}
 	
+	// Security check: limit maximum message size to prevent DoS
+	const DWORD maxMessageSize = 64 * 1024; // 64KB limit
+	if (bytesAvailable > maxMessageSize)
+	{
+		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, maxMessageSize);
+		_DisconnectFromDesktopClient();
+		return;
+	}
+	
 	// Allocate buffer based on bytesAvailable, with space for null terminator
 	char* buffer = new char[bytesAvailable + 1];
 	DWORD bytesRead = 0;
@@ -728,39 +744,54 @@ void RdpProvider::_CheckForIncomingMessages()
 			PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
 			HRESULT hrRequest = _RequestCredentialsFromClient(&pwzUsername, &pwzPassword, &pwzDomain);
 			
-			if (SUCCEEDED(hrRequest) && pwzUsername && pwzPassword)
+			if (SUCCEEDED(hrRequest))
 			{
-				g_log.Write("Received credentials for user: %ws", pwzUsername);
-				
-				// Update the existing credential tile with the new credentials
+				g_log.Write("Successfully received credentials from desktop client");
 				if (_dwNumCreds > 0 && _rgpCredentials[0])
 				{
-					RdpCredential* pCred = static_cast<RdpCredential*>(_rgpCredentials[0]);
-					pCred->UpdateCredentials(pwzUsername, pwzPassword, pwzDomain);
-				}
-				
-				// Clean up the allocated strings
-				CoTaskMemFree(pwzUsername);
-				CoTaskMemFree(pwzPassword);
-				CoTaskMemFree(pwzDomain);
-				
-				// Call CredentialsChanged to trigger auto-login
-				if (_pCredentialProviderEvents)
-				{
-					g_log.Write("Triggering Windows auto-login");
-					_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
+					HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(pwzUsername, pwzPassword, pwzDomain);
+					if (SUCCEEDED(hrUpdate))
+					{
+						g_log.Write("Successfully updated RdpCredential with new credentials");
+						if (_pCredentialProviderEvents)
+						{
+							_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
+						}
+					}
+					else
+					{
+						g_log.Write("ERROR: Failed to update RdpCredential - HRESULT: 0x%08X", hrUpdate);
+					}
 				}
 			}
 			else
 			{
-				g_log.Write("ERROR: Failed to get credentials after trigger message");
+				g_log.Write("ERROR: Failed to get credentials from desktop client - HRESULT: 0x%08X", hrRequest);
 			}
+
+			// Clean up allocated memory
+			if (pwzUsername) CoTaskMemFree(pwzUsername);
+			if (pwzPassword) 
+			{
+				// Securely clear password before freeing
+				if (pwzPassword)
+				{
+					size_t len = wcslen(pwzPassword);
+					SecureZeroMemory(pwzPassword, len * sizeof(WCHAR));
+				}
+				CoTaskMemFree(pwzPassword);
+			}
+			if (pwzDomain) CoTaskMemFree(pwzDomain);
 		}
 	}
 	else
 	{
-		g_log.Write("ERROR: Failed to read message from pipe");
+		DWORD dwError = GetLastError();
+		g_log.Write("ERROR: Failed to read from pipe - error: %d", dwError);
 	}
+
+	// Always clean up the buffer
+	delete[] buffer;
 }
 
 // JSON Message builders for strongly typed communication with C# desktop client
@@ -792,7 +823,28 @@ void RdpProvider::_BuildCredentialRequestMessage(char* buffer, size_t bufferSize
 
 bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 {
-	g_log.Write("DEBUG: ParseCredentialResponse called with: %s", jsonResponse);
+	g_log.Write("DEBUG: ParseCredentialResponse called with: %s", jsonResponse ? jsonResponse : "NULL");
+
+	// Validate input parameter
+	if (!jsonResponse)
+	{
+		g_log.Write("ERROR: ParseCredentialResponse called with NULL pointer");
+		return false;
+	}
+
+	// Validate input length to prevent potential issues
+	size_t responseLen = strlen(jsonResponse);
+	if (responseLen == 0)
+	{
+		g_log.Write("ERROR: ParseCredentialResponse called with empty string");
+		return false;
+	}
+
+	if (responseLen > 64 * 1024) // 64KB limit
+	{
+		g_log.Write("ERROR: ParseCredentialResponse - input too large (%zu bytes)", responseLen);
+		return false;
+	}
 
 	// Clear existing credentials
 	g_log.Write("DEBUG: Clearing existing stored credentials");
@@ -827,15 +879,21 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		{
 			size_t username_len = username_end - username_start;
 			g_log.Write("DEBUG: Extracting username - length: %zu", username_len);
+			
 			size_t max_username_chars = sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1;
 			if (username_len > max_username_chars) {
 				g_log.Write("WARNING: Username length (%zu) exceeds buffer size (%zu), truncating", username_len, max_username_chars);
 				username_len = max_username_chars;
 			}
-			g_log.Write("DEBUG: Extracting username - length: %zu", username_len);
-			MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, (int)max_username_chars);
-			_wszStoredUsername[username_len] = L'\0'; // Ensure null-termination
-			g_log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
+			
+			int converted = MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, (int)max_username_chars);
+			if (converted == 0) {
+				g_log.Write("ERROR: MultiByteToWideChar failed for username extraction (GetLastError: %lu)", GetLastError());
+				_wszStoredUsername[0] = L'\0';
+			} else {
+				_wszStoredUsername[converted] = L'\0'; // Ensure null-termination
+				g_log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
+			}
 		}
 		else
 		{
@@ -849,6 +907,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		{
 			size_t password_len = password_end - password_start;
 			g_log.Write("DEBUG: Extracting password - length: %zu", password_len);
+			
 			// Calculate max bytes to convert based on buffer size
 			int max_wchars = (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1);
 			// Worst case: each UTF-8 byte could be one WCHAR, so cap input length
@@ -856,14 +915,13 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 				g_log.Write("WARNING: Password length exceeds buffer size, truncating");
 				password_len = max_wchars;
 			}
+			
 			int converted = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, max_wchars);
-			_wszStoredPassword[converted] = L'\0'; // Ensure null-termination
-			int pw_chars = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1));
-			if (pw_chars == 0) {
+			if (converted == 0) {
 				g_log.Write("ERROR: MultiByteToWideChar failed for password extraction (GetLastError: %lu)", GetLastError());
 				_wszStoredPassword[0] = L'\0';
 			} else {
-				_wszStoredPassword[pw_chars] = L'\0';
+				_wszStoredPassword[converted] = L'\0'; // Ensure null-termination
 				g_log.Write("DEBUG: Password extracted (length: %zu characters)", wcslen(_wszStoredPassword));
 			}
 		}
@@ -881,15 +939,14 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 			{
 				size_t domain_len = domain_end - domain_start;
 				g_log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
+				
 				size_t max_domain_len = sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1;
 				if (domain_len > max_domain_len) {
 					g_log.Write("WARNING: Domain field too long (%zu), truncating to %zu characters", domain_len, max_domain_len);
 					domain_len = max_domain_len;
 				}
-				g_log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
-				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)max_domain_len);
-				_wszStoredDomain[domain_len] = L'\0'; // Ensure null-termination
-				int domain_chars = MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)(sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1));
+				
+				int domain_chars = MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)max_domain_len);
 				if (domain_chars == 0) {
 					_wszStoredDomain[0] = L'\0';
 					g_log.Write("ERROR: Failed to convert domain to wide char (MultiByteToWideChar failed)");

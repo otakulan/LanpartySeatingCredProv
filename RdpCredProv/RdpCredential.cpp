@@ -249,19 +249,25 @@ HRESULT RdpCredential::GetFieldState(DWORD dwFieldID, CREDENTIAL_PROVIDER_FIELD_
 {
 	HRESULT hr;
 
-	g_log.Write("RdpCredential::GetFieldState");
+	g_log.Write("RdpCredential::GetFieldState - Field ID: %d", dwFieldID);
 
-	if ((dwFieldID < ARRAYSIZE(_rgFieldStatePairs)) && pcpfs && pcpfis)
+	// Validate parameters and array bounds
+	if (!pcpfs || !pcpfis)
 	{
-		*pcpfs = _rgFieldStatePairs[dwFieldID].cpfs;
-		*pcpfis = _rgFieldStatePairs[dwFieldID].cpfis;
+		g_log.Write("ERROR: GetFieldState - Invalid parameters (pcpfs or pcpfis is NULL)");
+		return E_INVALIDARG;
+	}
 
-		hr = S_OK;
-	}
-	else
+	if (dwFieldID >= ARRAYSIZE(_rgFieldStatePairs))
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: GetFieldState - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgFieldStatePairs) - 1);
+		return E_INVALIDARG;
 	}
+
+	*pcpfs = _rgFieldStatePairs[dwFieldID].cpfs;
+	*pcpfis = _rgFieldStatePairs[dwFieldID].cpfis;
+
+	hr = S_OK;
 
 	return hr;
 }
@@ -270,16 +276,22 @@ HRESULT RdpCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz)
 {
 	HRESULT hr;
 
-	g_log.Write("RdpCredential::GetStringValue");
+	g_log.Write("RdpCredential::GetStringValue - Field ID: %d", dwFieldID);
 
-	if (dwFieldID < ARRAYSIZE(_rgCredProvFieldDescriptors) && ppwsz) 
+	// Validate parameters and array bounds
+	if (!ppwsz)
 	{
-		hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
+		g_log.Write("ERROR: GetStringValue - ppwsz is NULL");
+		return E_INVALIDARG;
 	}
-	else
+
+	if (dwFieldID >= ARRAYSIZE(_rgCredProvFieldDescriptors))
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: GetStringValue - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgCredProvFieldDescriptors) - 1);
+		return E_INVALIDARG;
 	}
+
+	hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
 
 	return hr;
 }
@@ -334,23 +346,36 @@ HRESULT RdpCredential::GetSubmitButtonValue(DWORD dwFieldID, DWORD* pdwAdjacentT
 HRESULT RdpCredential::SetStringValue(DWORD dwFieldID, PCWSTR pwz)
 {
 	HRESULT hr;
-	PSTR pz = NULL;
 
 	// don't log the value, because it can include typed credentials
 	g_log.Write("RdpCredential::SetStringValue: dwFieldID: %d", (int) dwFieldID);
 
-	if ((dwFieldID < ARRAYSIZE(_rgCredProvFieldDescriptors)) && 
-		(CPFT_EDIT_TEXT == _rgCredProvFieldDescriptors[dwFieldID].cpft || 
-		CPFT_PASSWORD_TEXT == _rgCredProvFieldDescriptors[dwFieldID].cpft)) 
+	// Validate array bounds
+	if (dwFieldID >= ARRAYSIZE(_rgCredProvFieldDescriptors))
 	{
-		PWSTR* ppwszStored = &_rgFieldStrings[dwFieldID];
-		CoTaskMemFree(*ppwszStored);
-		hr = SHStrDupW(pwz, ppwszStored);
+		g_log.Write("ERROR: SetStringValue - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgCredProvFieldDescriptors) - 1);
+		return E_INVALIDARG;
 	}
-	else
+
+	// Check if field type allows string setting
+	if (CPFT_EDIT_TEXT != _rgCredProvFieldDescriptors[dwFieldID].cpft && 
+		CPFT_PASSWORD_TEXT != _rgCredProvFieldDescriptors[dwFieldID].cpft)
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: SetStringValue - Field ID %d is not editable (type: %d)", dwFieldID, _rgCredProvFieldDescriptors[dwFieldID].cpft);
+		return E_INVALIDARG;
 	}
+
+	PWSTR* ppwszStored = &_rgFieldStrings[dwFieldID];
+	
+	// Securely clear existing password data
+	if (dwFieldID == SFI_PASSWORD && *ppwszStored)
+	{
+		size_t len = wcslen(*ppwszStored);
+		SecureZeroMemory(*ppwszStored, len * sizeof(WCHAR));
+	}
+	
+	CoTaskMemFree(*ppwszStored);
+	hr = SHStrDupW(pwz, ppwszStored);
 
 	return hr;
 }
