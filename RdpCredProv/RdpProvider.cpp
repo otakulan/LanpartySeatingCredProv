@@ -811,7 +811,14 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		{
 			size_t username_len = username_end - username_start;
 			log.Write("DEBUG: Extracting username - length: %zu", username_len);
-			MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1);
+			size_t max_username_chars = sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1;
+			if (username_len > max_username_chars) {
+				log.Write("WARNING: Username length (%zu) exceeds buffer size (%zu), truncating", username_len, max_username_chars);
+				username_len = max_username_chars;
+			}
+			log.Write("DEBUG: Extracting username - length: %zu", username_len);
+			MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, (int)max_username_chars);
+			_wszStoredUsername[username_len] = L'\0'; // Ensure null-termination
 			log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
 		}
 		else
