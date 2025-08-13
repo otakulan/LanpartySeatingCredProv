@@ -858,7 +858,14 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 				log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
 				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)max_domain_len);
 				_wszStoredDomain[domain_len] = L'\0'; // Ensure null-termination
-				log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
+				int domain_chars = MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)(sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1));
+				if (domain_chars == 0) {
+					_wszStoredDomain[0] = L'\0';
+					log.Write("ERROR: Failed to convert domain to wide char (MultiByteToWideChar failed)");
+				} else {
+					_wszStoredDomain[domain_chars] = L'\0';
+					log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
+				}
 			}
 			else
 			{
