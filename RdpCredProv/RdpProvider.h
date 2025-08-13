@@ -68,6 +68,18 @@ private:
 	HRESULT _EnumerateSetSerialization();
 	HRESULT _EnumerateCredentials();
 	void _CleanupSetSerialization();
+	HRESULT _ConnectToDesktopClient();
+	HRESULT _RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* ppwzPassword, PWSTR* ppwzDomain);
+	void _DisconnectFromDesktopClient();
+	void _CheckForIncomingMessages();
+	void _StartBackgroundMessageThread();
+	void _StopBackgroundMessageThread();
+	static DWORD WINAPI _BackgroundMessageThreadProc(LPVOID lpParam);
+	
+	// JSON Message builders for strongly typed communication
+	void _BuildCredentialProviderConnectedMessage(char* buffer, size_t bufferSize);
+	void _BuildCredentialRequestMessage(char* buffer, size_t bufferSize);
+	bool ParseCredentialResponse(const char* jsonResponse);
 
 private:
 	LONG _cRef;
@@ -81,4 +93,20 @@ private:
 	bool _bAutoLogonWithDefault;
 	bool _bUseDefaultCredentials;
 	CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
+	
+	// Named pipe client to connect to desktop service
+	ICredentialProviderEvents* _pCredentialProviderEvents;
+	UINT_PTR _upAdviseContext;
+	HANDLE _hPipe;
+	
+	// Stored credentials from desktop client
+	WCHAR _wszStoredUsername[256];
+	WCHAR _wszStoredPassword[256];
+	WCHAR _wszStoredDomain[256];
+	bool _bHasStoredCredentials;
+	
+	// Background message checking thread
+	HANDLE _hMessageThread;
+	HANDLE _hStopEvent;
+	bool _bThreadRunning;
 };

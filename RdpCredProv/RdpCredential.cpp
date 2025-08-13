@@ -8,6 +8,7 @@
 #include "guid.h"
 
 extern CLogFile log;
+extern HINSTANCE g_hinst;
 
 RdpCredential::RdpCredential():
 	_cRef(1),
@@ -24,6 +25,7 @@ RdpCredential::RdpCredential():
 
 RdpCredential::~RdpCredential()
 {
+	// Securely clear password field if it exists
 	if (_rgFieldStrings[SFI_PASSWORD])
 	{
 		size_t lenPassword;
@@ -32,10 +34,6 @@ RdpCredential::~RdpCredential()
 		if (SUCCEEDED(hr))
 		{
 			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
-		}
-		else
-		{
-
 		}
 	}
 
@@ -64,9 +62,29 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 		hr = FieldDescriptorCopy(rgcpfd[i], &_rgCredProvFieldDescriptors[i]);
 	}
 	
+	// Initialize text field strings - extract from the copied field descriptors
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(pwzUsername, &_rgFieldStrings[SFI_USERNAME]);
+		// Tile image has no string value
+		hr = SHStrDupW(L"", &_rgFieldStrings[SFI_TILEIMAGE]);
+	}
+	
+	if (SUCCEEDED(hr))
+	{
+		// Main text field - use the label from the copied field descriptor
+		hr = SHStrDupW(_rgCredProvFieldDescriptors[SFI_MAIN_TEXT].pszLabel, &_rgFieldStrings[SFI_MAIN_TEXT]);
+	}
+
+	if (SUCCEEDED(hr))
+	{
+		// Help text field - use the label from the copied field descriptor
+		hr = SHStrDupW(_rgCredProvFieldDescriptors[SFI_HELP_TEXT].pszLabel, &_rgFieldStrings[SFI_HELP_TEXT]);
+	}
+
+	// Initialize hidden credential fields
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
 	}
 	
 	if (SUCCEEDED(hr))
@@ -76,15 +94,89 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
+		hr = SHStrDupW(L"Submit", &_rgFieldStrings[SFI_SUBMIT_BUTTON]);
 	}
 
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(L"Submit", &_rgFieldStrings[SFI_SUBMIT_BUTTON]);
+		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
 	}
 
 	return S_OK;
+}
+
+HRESULT RdpCredential::UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword, PCWSTR pwzDomain)
+{
+	HRESULT hr = S_OK;
+
+	log.Write("DEBUG: RdpCredential::UpdateCredentials called - Username: %ws", pwzUsername ? pwzUsername : L"NULL");
+
+	// Update username
+	if (_rgFieldStrings[SFI_USERNAME])
+	{
+		CoTaskMemFree(_rgFieldStrings[SFI_USERNAME]);
+		_rgFieldStrings[SFI_USERNAME] = NULL;
+	}
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
+		if (SUCCEEDED(hr))
+		{
+			log.Write("DEBUG: Updated username field: %ws", _rgFieldStrings[SFI_USERNAME]);
+		}
+		else
+		{
+			log.Write("ERROR: Failed to update username field - HRESULT: 0x%08X", hr);
+		}
+	}
+
+	// Update password
+	if (_rgFieldStrings[SFI_PASSWORD])
+	{
+		// Securely clear existing password
+		size_t lenPassword;
+		HRESULT hrLen = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &lenPassword);
+		if (SUCCEEDED(hrLen))
+		{
+			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(WCHAR));
+		}
+		CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+		_rgFieldStrings[SFI_PASSWORD] = NULL;
+	}
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzPassword ? pwzPassword : L"", &_rgFieldStrings[SFI_PASSWORD]);
+		if (SUCCEEDED(hr))
+		{
+			log.Write("DEBUG: Updated password field (length: %zu chars)", pwzPassword ? wcslen(pwzPassword) : 0);
+		}
+		else
+		{
+			log.Write("ERROR: Failed to update password field - HRESULT: 0x%08X", hr);
+		}
+	}
+
+	// Update domain
+	if (pwszDomain)
+	{
+		CoTaskMemFree(pwszDomain);
+		pwszDomain = NULL;
+	}
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
+		if (SUCCEEDED(hr))
+		{
+			log.Write("DEBUG: Updated domain field: %ws", pwszDomain);
+		}
+		else
+		{
+			log.Write("ERROR: Failed to update domain field - HRESULT: 0x%08X", hr);
+		}
+	}
+
+	log.Write("DEBUG: RdpCredential::UpdateCredentials completed - HRESULT: 0x%08X", hr);
+	return hr;
 }
 
 HRESULT RdpCredential::Advise(ICredentialProviderCredentialEvents* pcpce)
@@ -200,7 +292,7 @@ HRESULT RdpCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 
 	if ((SFI_TILEIMAGE == dwFieldID) && phbmp)
 	{
-		HBITMAP hbmp = LoadBitmap(HINST_THISDLL, MAKEINTRESOURCE(IDB_TILE_IMAGE));
+		HBITMAP hbmp = LoadBitmap(g_hinst, MAKEINTRESOURCE(IDB_TILE_IMAGE));
 
 		if (hbmp != NULL)
 		{
@@ -329,15 +421,42 @@ HRESULT RdpCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RE
 	CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, PWSTR* ppwszOptionalStatusText,
 	CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-	HRESULT hr;
+	HRESULT hr = S_OK;
 
 	UNREFERENCED_PARAMETER(ppwszOptionalStatusText);
 	UNREFERENCED_PARAMETER(pcpsiOptionalStatusIcon);
 
 	log.Write("RdpCredential::GetSerialization");
 
-	if (pwszDomain && (!wcscmp(pwszDomain, L".")))
+	// Handle domain field - if empty or null, use local computer name for local logon
+	if (!pwszDomain || wcslen(pwszDomain) == 0)
 	{
+		log.Write("DEBUG: Domain is empty, using local computer name");
+		WCHAR wsz[MAX_COMPUTERNAME_LENGTH + 1];
+		DWORD cch = ARRAYSIZE(wsz);
+
+		if (GetComputerNameW(wsz, &cch))
+		{
+			if (pwszDomain)
+			{
+				CoTaskMemFree(pwszDomain);
+			}
+			hr = SHStrDupW(wsz, &pwszDomain);
+			log.Write("DEBUG: Set domain to computer name: %ws", pwszDomain);
+		}
+		else
+		{
+			log.Write("ERROR: Failed to get computer name, using '.' for local domain");
+			if (pwszDomain)
+			{
+				CoTaskMemFree(pwszDomain);
+			}
+			hr = SHStrDupW(L".", &pwszDomain);
+		}
+	}
+	else if (!wcscmp(pwszDomain, L"."))
+	{
+		// Original logic for explicit "." domain
 		WCHAR wsz[MAX_COMPUTERNAME_LENGTH + 1];
 		DWORD cch = ARRAYSIZE(wsz);
 
@@ -360,6 +479,12 @@ HRESULT RdpCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RE
 		KERB_INTERACTIVE_UNLOCK_LOGON kiul;
 
 		PWSTR pwszUserName = _rgFieldStrings[SFI_USERNAME];
+
+		// Add detailed logging before attempting logon
+		log.Write("DEBUG: GetSerialization preparing logon - Username: %ws, Domain: %ws, Password length: %zu", 
+			pwszUserName ? pwszUserName : L"NULL",
+			pwszDomain ? pwszDomain : L"NULL",
+			_rgFieldStrings[SFI_PASSWORD] ? wcslen(_rgFieldStrings[SFI_PASSWORD]) : 0);
 
 		char* pszUserName = NULL;
 		char* pszDomain = NULL;

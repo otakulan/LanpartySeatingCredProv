@@ -90,6 +90,8 @@ public:
 		PCWSTR pwzPassword = NULL,
 		PCWSTR pwzDomain = NULL);
 
+	HRESULT UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword, PCWSTR pwzDomain);
+
 	RdpCredential();
 	virtual ~RdpCredential();
 
