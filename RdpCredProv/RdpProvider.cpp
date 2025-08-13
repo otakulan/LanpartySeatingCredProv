@@ -827,7 +827,14 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 			size_t password_len = password_end - password_start;
 			log.Write("DEBUG: Extracting password - length: %zu", password_len);
 			MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1));
-			log.Write("DEBUG: Password extracted (length: %zu characters)", wcslen(_wszStoredPassword));
+			int pw_chars = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1));
+			if (pw_chars == 0) {
+				log.Write("ERROR: MultiByteToWideChar failed for password extraction (GetLastError: %lu)", GetLastError());
+				_wszStoredPassword[0] = L'\0';
+			} else {
+				_wszStoredPassword[pw_chars] = L'\0';
+				log.Write("DEBUG: Password extracted (length: %zu characters)", wcslen(_wszStoredPassword));
+			}
 		}
 		else
 		{
