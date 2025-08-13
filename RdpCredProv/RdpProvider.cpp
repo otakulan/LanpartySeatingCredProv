@@ -811,7 +811,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		{
 			size_t username_len = username_end - username_start;
 			log.Write("DEBUG: Extracting username - length: %zu", username_len);
-			MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, 255);
+			MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1);
 			log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
 		}
 		else
