@@ -843,7 +843,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 			{
 				size_t domain_len = domain_end - domain_start;
 				log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
-				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, 255);
+				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1);
 				log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
 			}
 			else
