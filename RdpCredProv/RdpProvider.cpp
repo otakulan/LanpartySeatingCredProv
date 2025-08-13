@@ -843,7 +843,14 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 			{
 				size_t domain_len = domain_end - domain_start;
 				log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
-				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1);
+				size_t max_domain_len = sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1;
+				if (domain_len > max_domain_len) {
+					log.Write("WARNING: Domain field too long (%zu), truncating to %zu characters", domain_len, max_domain_len);
+					domain_len = max_domain_len;
+				}
+				log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
+				MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)max_domain_len);
+				_wszStoredDomain[domain_len] = L'\0'; // Ensure null-termination
 				log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
 			}
 			else
