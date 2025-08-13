@@ -621,7 +621,28 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		log.Write("DEBUG: Received credential response (%d bytes): %s", bytesRead, buffer);
 
 		// Parse the JSON response to extract credentials
-		if (ParseCredentialResponse(buffer))
+	std::string responseBuffer;
+	const DWORD chunkSize = 1024;
+	DWORD bytesRead = 0;
+	char tempBuffer[chunkSize];
+	BOOL readResult = FALSE;
+	do
+	{
+		readResult = ReadFile(_hPipe, tempBuffer, chunkSize, &bytesRead, NULL);
+		if (readResult && bytesRead > 0)
+		{
+			responseBuffer.append(tempBuffer, bytesRead);
+		}
+	} while (readResult && bytesRead == chunkSize);
+
+	if (!responseBuffer.empty())
+	{
+		// Ensure null-termination for C-string compatibility
+		responseBuffer.push_back('\0');
+		log.Write("DEBUG: Received credential response (%zu bytes): %s", responseBuffer.size() - 1, responseBuffer.c_str());
+
+		// Parse the JSON response to extract credentials
+		if (ParseCredentialResponse(responseBuffer.c_str()))
 		{
 			log.Write("DEBUG: Successfully parsed credential response");
 			log.Write("DEBUG: _bHasStoredCredentials is now: %s", _bHasStoredCredentials ? "true" : "false");
