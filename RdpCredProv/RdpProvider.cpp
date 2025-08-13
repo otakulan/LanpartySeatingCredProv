@@ -717,7 +717,10 @@ void RdpProvider::_CheckForIncomingMessages()
 	}
 	char buffer[1024];
 	DWORD bytesRead;
-	result = ReadFile(_hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+	// Allocate buffer based on bytesAvailable, with space for null terminator
+	char* buffer = new char[bytesAvailable + 1];
+	DWORD bytesRead = 0;
+	result = ReadFile(_hPipe, buffer, bytesAvailable, &bytesRead, NULL);
 
 	if (result && bytesRead > 0)
 	{
