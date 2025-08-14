@@ -95,9 +95,9 @@ private:
 	bool HasStoredCredentials() const;
 	void StoreCredentials(const std::wstring& username, const std::wstring& password, const std::wstring& domain);
 	void ClearCredentials();
-	PWSTR GetStoredUsername() const;
-	PWSTR GetStoredPassword() const;
-	PWSTR GetStoredDomain() const;
+	PCWSTR GetStoredUsername() const;
+	PCWSTR GetStoredPassword() const;
+	PCWSTR GetStoredDomain() const;
 
 private:
 	LONG _cRef;

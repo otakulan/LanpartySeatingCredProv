@@ -13,9 +13,6 @@
 
 // Constants for robust JSON parsing and message handling
 static const DWORD MAX_RESPONSE_SIZE = 64 * 1024; // 64KB limit for security
-static const size_t USERNAME_FIELD_PREFIX_LEN = strlen("\"Username\":\"");
-static const size_t PASSWORD_FIELD_PREFIX_LEN = strlen("\"Password\":\"");
-static const size_t DOMAIN_FIELD_PREFIX_LEN = strlen("\"Domain\":\"");
 
 CLogFile g_log;
 
@@ -1100,26 +1097,26 @@ void RdpProvider::ClearCredentials()
 	SecureZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
 }
 
-PWSTR RdpProvider::GetStoredUsername() const
+PCWSTR RdpProvider::GetStoredUsername() const
 {
 	if (_storedCredentials.has_value()) {
-		return const_cast<PWSTR>(_storedCredentials->username.c_str());
+		return _storedCredentials->username.c_str();
 	}
 	return nullptr;
 }
 
-PWSTR RdpProvider::GetStoredPassword() const
+PCWSTR RdpProvider::GetStoredPassword() const
 {
 	if (_storedCredentials.has_value()) {
-		return const_cast<PWSTR>(_storedCredentials->password.c_str());
+		return _storedCredentials->password.c_str();
 	}
 	return nullptr;
 }
 
-PWSTR RdpProvider::GetStoredDomain() const
+PCWSTR RdpProvider::GetStoredDomain() const
 {
 	if (_storedCredentials.has_value()) {
-		return const_cast<PWSTR>(_storedCredentials->domain.c_str());
+		return _storedCredentials->domain.c_str();
 	}
 	return nullptr;
 }
