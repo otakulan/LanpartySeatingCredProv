@@ -8,6 +8,16 @@
 #include <shlobj.h>
 #include <strsafe.h>
 #include <string>
+#include <nlohmann/json.hpp>
+
+// Constants for security limits
+static const DWORD MAX_MESSAGE_SIZE = 64 * 1024;   // 64KB limit for security
+static const char* TRIGGER_LOGIN_MESSAGE_TYPE = "triggerloginrequest";
+
+// Constants for JSON field prefix lengths (including quotes and colon)
+static const size_t USERNAME_FIELD_PREFIX_LEN = 11;  // "Username":"
+static const size_t PASSWORD_FIELD_PREFIX_LEN = 11;  // "Password":"
+static const size_t DOMAIN_FIELD_PREFIX_LEN = 9;     // "Domain":"
 
 CLogFile g_log;
 
@@ -616,7 +626,6 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 	// Read the response with a timeout and size limit
 	std::string responseBuffer;
 	const DWORD chunkSize = 1024;
-	const DWORD maxResponseSize = 64 * 1024; // 64KB limit for security
 	DWORD bytesRead = 0;
 	char tempBuffer[chunkSize];
 	BOOL readResult = FALSE;
@@ -626,14 +635,14 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		if (readResult && bytesRead > 0)
 		{
 			// Check size limit to prevent DoS
-			if (responseBuffer.size() + bytesRead > maxResponseSize)
+			if (responseBuffer.size() + bytesRead > MAX_MESSAGE_SIZE)
 			{
-				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", maxResponseSize);
+				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", MAX_MESSAGE_SIZE);
 				break;
 			}
 			responseBuffer.append(tempBuffer, bytesRead);
 		}
-	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < maxResponseSize);
+	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < MAX_MESSAGE_SIZE);
 
 	if (!responseBuffer.empty())
 	{
@@ -717,10 +726,9 @@ void RdpProvider::_CheckForIncomingMessages()
 	}
 	
 	// Security check: limit maximum message size to prevent DoS
-	const DWORD maxMessageSize = 64 * 1024; // 64KB limit
-	if (bytesAvailable > maxMessageSize)
+	if (bytesAvailable > MAX_MESSAGE_SIZE)
 	{
-		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, maxMessageSize);
+		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, MAX_MESSAGE_SIZE);
 		_DisconnectFromDesktopClient();
 		return;
 	}
@@ -735,10 +743,14 @@ void RdpProvider::_CheckForIncomingMessages()
 		buffer[bytesRead] = '\0';
 		g_log.Write("Received message from desktop client: %s", buffer);
 
-		// Parse the trigger login message
-		if (strstr(buffer, "\"$type\":\"triggerloginrequest\""))
+		// Parse the trigger login message using JSON
+		try
 		{
-			g_log.Write("Processing TriggerLoginRequest - requesting credentials");
+			nlohmann::json msg = nlohmann::json::parse(buffer);
+			
+			if (msg.contains("$type") && msg["$type"] == TRIGGER_LOGIN_MESSAGE_TYPE)
+			{
+				g_log.Write("Processing TriggerLoginRequest - requesting credentials");
 			
 			// Request credentials from desktop client immediately
 			PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
@@ -782,6 +794,11 @@ void RdpProvider::_CheckForIncomingMessages()
 				CoTaskMemFree(pwzPassword);
 			}
 			if (pwzDomain) CoTaskMemFree(pwzDomain);
+			}
+		}
+		catch (const nlohmann::json::exception& e)
+		{
+			g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
 		}
 	}
 	else
@@ -840,7 +857,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		return false;
 	}
 
-	if (responseLen > 64 * 1024) // 64KB limit
+	if (responseLen > MAX_MESSAGE_SIZE)
 	{
 		g_log.Write("ERROR: ParseCredentialResponse - input too large (%zu bytes)", responseLen);
 		return false;
@@ -873,7 +890,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 	if (username_start && password_start)
 	{
 		// Extract username
-		username_start += 12; // Skip "Username":"
+		username_start += USERNAME_FIELD_PREFIX_LEN; // Skip "Username":"
 		const char* username_end = strchr(username_start, '"');
 		if (username_end)
 		{
@@ -901,7 +918,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		}
 		
 		// Extract password
-		password_start += 12; // Skip "Password":"
+		password_start += PASSWORD_FIELD_PREFIX_LEN; // Skip "Password":"
 		const char* password_end = strchr(password_start, '"');
 		if (password_end)
 		{
@@ -933,7 +950,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		// Extract domain (optional)
 		if (domain_start)
 		{
-			domain_start += 9; // Skip "Domain":"
+			domain_start += DOMAIN_FIELD_PREFIX_LEN; // Skip "Domain":"
 			const char* domain_end = strchr(domain_start, '"');
 			if (domain_end && domain_start != domain_end)
 			{
