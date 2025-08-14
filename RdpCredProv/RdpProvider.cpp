@@ -756,24 +756,54 @@ void RdpProvider::_CheckForIncomingMessages()
 			
 			if (messageType == "triggerloginrequest")
 			{
-				g_log.Write("Processing TriggerLoginRequest - requesting credentials");
+				g_log.Write("Processing TriggerLoginRequest with embedded credentials");
 				
-				// Request credentials from desktop client immediately
-				PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
-				HRESULT hrRequest = _RequestCredentialsFromClient(&pwzUsername, &pwzPassword, &pwzDomain);
+				// Extract credentials directly from the trigger message
+				std::string username = message.value("Username", "");
+				std::string password = message.value("Password", "");
+				std::string domain = "";
 				
-				if (SUCCEEDED(hrRequest))
+				// Handle domain field which can be null in JSON
+				if (message.contains("Domain") && !message["Domain"].is_null())
 				{
-					g_log.Write("Successfully received credentials from desktop client");
-					if (_dwNumCreds > 0 && _rgpCredentials[0])
+					domain = message["Domain"].get<std::string>();
+				}
+				
+				if (username.empty())
+				{
+					g_log.Write("ERROR: TriggerLoginRequest missing username");
+					return;
+				}
+				
+				g_log.Write("Received credentials in trigger message - Username: %s, Domain: %s, Password length: %zu", 
+					username.c_str(), domain.empty() ? "local" : domain.c_str(), password.length());
+				
+				// Convert to wide strings for Windows API
+				std::wstring wUsername(username.begin(), username.end());
+				std::wstring wPassword(password.begin(), password.end());
+				std::wstring wDomain(domain.begin(), domain.end());
+				
+				// Store credentials using modern approach
+				StoreCredentials(wUsername, wPassword, wDomain);
+				g_log.Write("Successfully stored credentials from trigger message");
+				
+				// Update existing credential tile if available
+				if (_dwNumCreds > 0 && _rgpCredentials[0])
+				{
+					HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(wUsername.c_str(), wPassword.c_str(), wDomain.c_str());
+					if (SUCCEEDED(hrUpdate))
 					{
-						HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(pwzUsername, pwzPassword, pwzDomain);
-						if (SUCCEEDED(hrUpdate))
-						{
-							g_log.Write("Successfully updated RdpCredential with new credentials");
+						g_log.Write("Successfully updated RdpCredential with new credentials from trigger");
+						
+						// Notify Windows that credentials have changed
 						if (_pCredentialProviderEvents)
 						{
 							_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
+							g_log.Write("Notified Windows of credential changes");
+						}
+						else
+						{
+							g_log.Write("WARNING: No credential provider events available to notify of changes");
 						}
 					}
 					else
@@ -781,22 +811,10 @@ void RdpProvider::_CheckForIncomingMessages()
 						g_log.Write("ERROR: Failed to update RdpCredential - HRESULT: 0x%08X", hrUpdate);
 					}
 				}
-			}
-			else
-			{
-				g_log.Write("ERROR: Failed to get credentials from desktop client - HRESULT: 0x%08X", hrRequest);
-			}
-
-			// Clean up allocated memory
-			if (pwzUsername) CoTaskMemFree(pwzUsername);
-			if (pwzPassword) 
-			{
-				// Securely clear password before freeing
-				size_t len = wcslen(pwzPassword);
-				SecureZeroMemory(pwzPassword, len * sizeof(WCHAR));
-				CoTaskMemFree(pwzPassword);
-			}
-			if (pwzDomain) CoTaskMemFree(pwzDomain);
+				else
+				{
+					g_log.Write("WARNING: No credential tiles available to update");
+				}
 			}
 		}
 		catch (const nlohmann::json::exception& e)
