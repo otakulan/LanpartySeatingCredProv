@@ -2,12 +2,22 @@
 #include <credentialprovider.h>
 #include <windows.h>
 #include <strsafe.h>
+#include <optional>
+#include <string>
 
 #include "RdpCredential.h"
 #include "helpers.h"
 
 #define MAX_CREDENTIALS		1
 #define MAX_DWORD		0xFFFFFFFF
+
+// Structure to hold stored credentials
+struct StoredCredentials
+{
+	std::wstring username;
+	std::wstring password;
+	std::wstring domain;
+};
 
 class RdpProvider : public ICredentialProvider
 {
@@ -80,6 +90,14 @@ private:
 	void _BuildCredentialProviderConnectedMessage(char* buffer, size_t bufferSize);
 	void _BuildCredentialRequestMessage(char* buffer, size_t bufferSize);
 	bool ParseCredentialResponse(const char* jsonResponse);
+	
+	// Helper functions for credential storage refactoring
+	bool HasStoredCredentials() const;
+	void StoreCredentials(const std::wstring& username, const std::wstring& password, const std::wstring& domain);
+	void ClearCredentials();
+	PWSTR GetStoredUsername() const;
+	PWSTR GetStoredPassword() const;
+	PWSTR GetStoredDomain() const;
 
 private:
 	LONG _cRef;
@@ -100,6 +118,9 @@ private:
 	HANDLE _hPipe;
 	
 	// Stored credentials from desktop client
+	std::optional<StoredCredentials> _storedCredentials;
+	
+	// Legacy credential storage (maintained for backwards compatibility during transition)
 	WCHAR _wszStoredUsername[256];
 	WCHAR _wszStoredPassword[256];
 	WCHAR _wszStoredDomain[256];

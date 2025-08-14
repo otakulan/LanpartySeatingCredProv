@@ -27,7 +27,8 @@ windows_rc_generate_version_info(
 
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-# Enable C++ exception handling
+# Enable C++ exception handling and set C++17 standard
 target_compile_options(RdpCredProv PRIVATE /EHsc)
+set_target_properties(RdpCredProv PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 target_link_libraries(RdpCredProv secur32 shlwapi nlohmann_json::nlohmann_json)

@@ -33,7 +33,6 @@ RdpProvider::RdpProvider():
 	_pCredentialProviderEvents(NULL),
 	_upAdviseContext(0),
 	_hPipe(INVALID_HANDLE_VALUE),
-	_bHasStoredCredentials(false),
 	_hMessageThread(NULL),
 	_hStopEvent(NULL),
 	_bThreadRunning(false)
@@ -44,6 +43,8 @@ RdpProvider::RdpProvider():
 	ZeroMemory(_wszStoredUsername, sizeof(_wszStoredUsername));
 	ZeroMemory(_wszStoredPassword, sizeof(_wszStoredPassword));
 	ZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
+	_bHasStoredCredentials = false;
+	// _storedCredentials is automatically initialized as empty std::optional
 
 	HKEY hKey;
 	DWORD cbSize;
@@ -319,7 +320,7 @@ HRESULT RdpProvider::GetCredentialCount(__out DWORD* pdwCount, __out DWORD* pdwD
 	// ALWAYS return 1 credential to keep Winlogon polling
 	*pdwCount = 1;
 	*pdwDefault = 0;
-	*pbAutoLogonWithDefault = _bHasStoredCredentials ? TRUE : FALSE;
+	*pbAutoLogonWithDefault = HasStoredCredentials() ? TRUE : FALSE;
 
 	return hr;
 }
@@ -345,7 +346,7 @@ HRESULT RdpProvider::_EnumerateCredentials()
     HRESULT hr = S_OK;
     DWORD dwCredentialIndex = 0;
     
-    g_log.Write("DEBUG: _EnumerateCredentials called - HasStoredCredentials: %s", _bHasStoredCredentials ? "true" : "false");
+    g_log.Write("DEBUG: _EnumerateCredentials called - HasStoredCredentials: %s", HasStoredCredentials() ? "true" : "false");
 
 	// Clean up any existing credentials first
 	for (size_t i = 0; i < _dwNumCreds; i++)
@@ -373,12 +374,12 @@ HRESULT RdpProvider::_EnumerateCredentials()
 		LPCWSTR pwzPassword = L"";
 		LPCWSTR pwzDomain = L"";
 
-		if (_bHasStoredCredentials)
+		if (HasStoredCredentials())
 		{
 			// Use credentials from desktop client (received via trigger message)
-			pwzUser = _wszStoredUsername;
-			pwzPassword = _wszStoredPassword;
-			pwzDomain = _wszStoredDomain;
+			pwzUser = GetStoredUsername();
+			pwzPassword = GetStoredPassword();
+			pwzDomain = GetStoredDomain();
 			g_log.Write("DEBUG: Using stored credentials from desktop client - User: %ws", pwzUser);
 		}
 		else
@@ -560,15 +561,15 @@ void RdpProvider::_DisconnectFromDesktopClient()
 HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* ppwzPassword, PWSTR* ppwzDomain)
 {
 	g_log.Write("DEBUG: _RequestCredentialsFromClient called");
-	g_log.Write("DEBUG: Current _bHasStoredCredentials: %s", _bHasStoredCredentials ? "true" : "false");
+	g_log.Write("DEBUG: Current HasStoredCredentials: %s", HasStoredCredentials() ? "true" : "false");
 
 	// If we already have stored credentials, return them
-	if (_bHasStoredCredentials)
+	if (HasStoredCredentials())
 	{
 		g_log.Write("DEBUG: Using existing stored credentials");
-		size_t userLen = wcslen(_wszStoredUsername) + 1;
-		size_t passLen = wcslen(_wszStoredPassword) + 1;
-		size_t domainLen = wcslen(_wszStoredDomain) + 1;
+		size_t userLen = wcslen(GetStoredUsername()) + 1;
+		size_t passLen = wcslen(GetStoredPassword()) + 1;
+		size_t domainLen = wcslen(GetStoredDomain()) + 1;
 
 		*ppwzUsername = (PWSTR)CoTaskMemAlloc(userLen * sizeof(WCHAR));
 		*ppwzPassword = (PWSTR)CoTaskMemAlloc(passLen * sizeof(WCHAR));
@@ -576,9 +577,9 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 
 		if (*ppwzUsername && *ppwzPassword && *ppwzDomain)
 		{
-			wcscpy_s(*ppwzUsername, userLen, _wszStoredUsername);
-			wcscpy_s(*ppwzPassword, passLen, _wszStoredPassword);
-			wcscpy_s(*ppwzDomain, domainLen, _wszStoredDomain);
+			wcscpy_s(*ppwzUsername, userLen, GetStoredUsername());
+			wcscpy_s(*ppwzPassword, passLen, GetStoredPassword());
+			wcscpy_s(*ppwzDomain, domainLen, GetStoredDomain());
 			g_log.Write("DEBUG: Successfully returned existing stored credentials");
 			return S_OK;
 		}
@@ -623,13 +624,20 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 
 	// Read the response with a timeout and size limit
 	std::string responseBuffer;
-	const DWORD chunkSize = 1024;
+	constexpr DWORD chunkSize = 1024;
 	DWORD bytesRead = 0;
-	char tempBuffer[chunkSize];
 	BOOL readResult = FALSE;
+	DWORD lastReadError = ERROR_SUCCESS;  // Capture ReadFile error immediately
 	do
 	{
+		char tempBuffer[chunkSize];
+		ZeroMemory(tempBuffer, chunkSize);  // Zero the buffer for security
 		readResult = ReadFile(_hPipe, tempBuffer, chunkSize, &bytesRead, NULL);
+		if (!readResult)
+		{
+			lastReadError = GetLastError();  // Capture error immediately after ReadFile fails
+		}
+		
 		if (readResult && bytesRead > 0)
 		{
 			// Check size limit to prevent DoS
@@ -652,12 +660,12 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		if (ParseCredentialResponse(responseBuffer.c_str()))
 		{
 			g_log.Write("DEBUG: Successfully parsed credential response");
-			g_log.Write("DEBUG: _bHasStoredCredentials is now: %s", _bHasStoredCredentials ? "true" : "false");
+			g_log.Write("DEBUG: HasStoredCredentials is now: %s", HasStoredCredentials() ? "true" : "false");
 			
 			// Return the newly stored credentials
-			size_t userLen = wcslen(_wszStoredUsername) + 1;
-			size_t passLen = wcslen(_wszStoredPassword) + 1;
-			size_t domainLen = wcslen(_wszStoredDomain) + 1;
+			size_t userLen = wcslen(GetStoredUsername()) + 1;
+			size_t passLen = wcslen(GetStoredPassword()) + 1;
+			size_t domainLen = wcslen(GetStoredDomain()) + 1;
 
 			*ppwzUsername = (PWSTR)CoTaskMemAlloc(userLen * sizeof(WCHAR));
 			*ppwzPassword = (PWSTR)CoTaskMemAlloc(passLen * sizeof(WCHAR));
@@ -665,9 +673,9 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 
 			if (*ppwzUsername && *ppwzPassword && *ppwzDomain)
 			{
-				wcscpy_s(*ppwzUsername, userLen, _wszStoredUsername);
-				wcscpy_s(*ppwzPassword, passLen, _wszStoredPassword);
-				wcscpy_s(*ppwzDomain, domainLen, _wszStoredDomain);
+				wcscpy_s(*ppwzUsername, userLen, GetStoredUsername());
+				wcscpy_s(*ppwzPassword, passLen, GetStoredPassword());
+				wcscpy_s(*ppwzDomain, domainLen, GetStoredDomain());
 				g_log.Write("DEBUG: Successfully returned newly received credentials");
 				return S_OK;
 			}
@@ -684,8 +692,7 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 	}
 	else
 	{
-		DWORD dwError = GetLastError();
-		g_log.Write("ERROR: Failed to read credential response - error: %d", dwError);
+		g_log.Write("ERROR: Failed to read credential response - error: %d", lastReadError);
 	}
 
 	g_log.Write("ERROR: Failed to get credentials from desktop client");
@@ -732,19 +739,19 @@ void RdpProvider::_CheckForIncomingMessages()
 	}
 	
 	// Allocate buffer based on bytesAvailable, with space for null terminator
-	char* buffer = new char[bytesAvailable + 1];
+	std::vector<char> buffer(bytesAvailable + 1);
 	DWORD bytesRead = 0;
-	result = ReadFile(_hPipe, buffer, bytesAvailable, &bytesRead, NULL);
+	result = ReadFile(_hPipe, buffer.data(), bytesAvailable, &bytesRead, NULL);
 
 	if (result && bytesRead > 0)
 	{
 		buffer[bytesRead] = '\0';
-		g_log.Write("Received message from desktop client: %s", buffer);
+		g_log.Write("Received message from desktop client: %s", buffer.data());
 
 		// Parse the trigger login message using proper JSON parsing
 		try 
 		{
-			nlohmann::json message = nlohmann::json::parse(buffer);
+			nlohmann::json message = nlohmann::json::parse(buffer.data());
 			std::string messageType = message.value("$type", "");
 			
 			// Case-insensitive comparison for message type
@@ -788,11 +795,8 @@ void RdpProvider::_CheckForIncomingMessages()
 			if (pwzPassword) 
 			{
 				// Securely clear password before freeing
-				if (pwzPassword)
-				{
-					size_t len = wcslen(pwzPassword);
-					SecureZeroMemory(pwzPassword, len * sizeof(WCHAR));
-				}
+				size_t len = wcslen(pwzPassword);
+				SecureZeroMemory(pwzPassword, len * sizeof(WCHAR));
 				CoTaskMemFree(pwzPassword);
 			}
 			if (pwzDomain) CoTaskMemFree(pwzDomain);
@@ -809,8 +813,7 @@ void RdpProvider::_CheckForIncomingMessages()
 		g_log.Write("ERROR: Failed to read from pipe - error: %d", dwError);
 	}
 
-	// Always clean up the buffer
-	delete[] buffer;
+	// std::vector automatically cleans up memory when it goes out of scope
 }
 
 // JSON Message builders for strongly typed communication with C# desktop client
@@ -867,10 +870,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 
 	// Clear existing credentials
 	g_log.Write("DEBUG: Clearing existing stored credentials");
-	SecureZeroMemory(_wszStoredUsername, sizeof(_wszStoredUsername));
-	SecureZeroMemory(_wszStoredPassword, sizeof(_wszStoredPassword));
-	SecureZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
-	_bHasStoredCredentials = false;
+	ClearCredentials();
 
 	try
 	{
@@ -893,75 +893,72 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		std::string password = response.value("Password", "");
 		std::string domain = response.value("Domain", "");
 
-		// Convert username to wide string
+		// Convert to wide strings for storage
+		std::wstring wUsername, wPassword, wDomain;
+		
 		if (!username.empty())
 		{
-			size_t max_username_chars = sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1;
-			int converted = MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, _wszStoredUsername, (int)max_username_chars);
-			if (converted == 0)
+			int len = MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, nullptr, 0);
+			if (len > 0)
 			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for username (GetLastError: %lu)", GetLastError());
-				_wszStoredUsername[0] = L'\0';
+				wUsername.resize(len - 1);
+				MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, &wUsername[0], len);
+				g_log.Write("DEBUG: Extracted username: %ws", wUsername.c_str());
 			}
 			else
 			{
-				g_log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
+				g_log.Write("ERROR: MultiByteToWideChar failed for username (GetLastError: %lu)", GetLastError());
 			}
 		}
 		else
 		{
-			_wszStoredUsername[0] = L'\0';
 			g_log.Write("DEBUG: Username field is empty");
 		}
 
-		// Convert password to wide string
 		if (!password.empty())
 		{
-			size_t max_password_chars = sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1;
-			int converted = MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, _wszStoredPassword, (int)max_password_chars);
-			if (converted == 0)
+			int len = MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, nullptr, 0);
+			if (len > 0)
 			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for password (GetLastError: %lu)", GetLastError());
-				_wszStoredPassword[0] = L'\0';
+				wPassword.resize(len - 1);
+				MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, &wPassword[0], len);
+				g_log.Write("DEBUG: Password extracted (length: %zu characters)", wPassword.length());
 			}
 			else
 			{
-				g_log.Write("DEBUG: Password extracted (length: %zu characters)", wcslen(_wszStoredPassword));
+				g_log.Write("ERROR: MultiByteToWideChar failed for password (GetLastError: %lu)", GetLastError());
 			}
 		}
 		else
 		{
-			_wszStoredPassword[0] = L'\0';
 			g_log.Write("DEBUG: Password field is empty");
 		}
 
-		// Convert domain to wide string
 		if (!domain.empty())
 		{
-			size_t max_domain_chars = sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1;
-			int converted = MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, _wszStoredDomain, (int)max_domain_chars);
-			if (converted == 0)
+			int len = MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, nullptr, 0);
+			if (len > 0)
 			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for domain (GetLastError: %lu)", GetLastError());
-				_wszStoredDomain[0] = L'\0';
+				wDomain.resize(len - 1);
+				MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, &wDomain[0], len);
+				g_log.Write("DEBUG: Extracted domain: %ws", wDomain.c_str());
 			}
 			else
 			{
-				g_log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
+				g_log.Write("ERROR: MultiByteToWideChar failed for domain (GetLastError: %lu)", GetLastError());
 			}
 		}
 		else
 		{
-			_wszStoredDomain[0] = L'\0';
 			g_log.Write("DEBUG: Domain field is empty or malformed");
 		}
 
-		// Mark credentials as available
-		_bHasStoredCredentials = true;
+		// Store credentials using the new structured approach
+		StoreCredentials(wUsername, wPassword, wDomain);
 		
-		g_log.Write("DEBUG: Successfully parsed all credentials - _bHasStoredCredentials set to true");
+		g_log.Write("DEBUG: Successfully parsed all credentials");
 		g_log.Write("DEBUG: Final stored credentials - User: %ws, Domain: %ws, Password: [%zu chars]", 
-			_wszStoredUsername, _wszStoredDomain, wcslen(_wszStoredPassword));
+			wUsername.c_str(), wDomain.c_str(), wPassword.length());
 
 		return true;
 	}
@@ -1073,4 +1070,56 @@ DWORD WINAPI RdpProvider::_BackgroundMessageThreadProc(LPVOID lpParam)
 
 	g_log.Write("DEBUG: Background message thread exiting");
 	return 0;
+}
+
+// Helper functions for credential storage refactoring
+bool RdpProvider::HasStoredCredentials() const
+{
+	return _storedCredentials.has_value();
+}
+
+void RdpProvider::StoreCredentials(const std::wstring& username, const std::wstring& password, const std::wstring& domain)
+{
+	_storedCredentials = StoredCredentials{ username, password, domain };
+	
+	// Keep legacy fields in sync during transition
+	_bHasStoredCredentials = true;
+	wcsncpy_s(_wszStoredUsername, username.c_str(), _TRUNCATE);
+	wcsncpy_s(_wszStoredPassword, password.c_str(), _TRUNCATE);
+	wcsncpy_s(_wszStoredDomain, domain.c_str(), _TRUNCATE);
+}
+
+void RdpProvider::ClearCredentials()
+{
+	_storedCredentials.reset();
+	
+	// Keep legacy fields in sync during transition
+	_bHasStoredCredentials = false;
+	SecureZeroMemory(_wszStoredUsername, sizeof(_wszStoredUsername));
+	SecureZeroMemory(_wszStoredPassword, sizeof(_wszStoredPassword));
+	SecureZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
+}
+
+PWSTR RdpProvider::GetStoredUsername() const
+{
+	if (_storedCredentials.has_value()) {
+		return const_cast<PWSTR>(_storedCredentials->username.c_str());
+	}
+	return nullptr;
+}
+
+PWSTR RdpProvider::GetStoredPassword() const
+{
+	if (_storedCredentials.has_value()) {
+		return const_cast<PWSTR>(_storedCredentials->password.c_str());
+	}
+	return nullptr;
+}
+
+PWSTR RdpProvider::GetStoredDomain() const
+{
+	if (_storedCredentials.has_value()) {
+		return const_cast<PWSTR>(_storedCredentials->domain.c_str());
+	}
+	return nullptr;
 }
