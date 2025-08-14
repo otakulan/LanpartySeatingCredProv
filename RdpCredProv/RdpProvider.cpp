@@ -10,15 +10,6 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
-// Constants for security limits
-static const DWORD MAX_MESSAGE_SIZE = 64 * 1024;   // 64KB limit for security
-static const char* TRIGGER_LOGIN_MESSAGE_TYPE = "triggerloginrequest";
-
-// Constants for JSON field prefix lengths (including quotes and colon)
-static const size_t USERNAME_FIELD_PREFIX_LEN = 11;  // "Username":"
-static const size_t PASSWORD_FIELD_PREFIX_LEN = 11;  // "Password":"
-static const size_t DOMAIN_FIELD_PREFIX_LEN = 9;     // "Domain":"
-
 CLogFile g_log;
 
 RdpProvider::RdpProvider():
@@ -626,6 +617,7 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 	// Read the response with a timeout and size limit
 	std::string responseBuffer;
 	const DWORD chunkSize = 1024;
+	const DWORD maxResponseSize = 64 * 1024; // 64KB limit for security
 	DWORD bytesRead = 0;
 	char tempBuffer[chunkSize];
 	BOOL readResult = FALSE;
@@ -635,14 +627,14 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		if (readResult && bytesRead > 0)
 		{
 			// Check size limit to prevent DoS
-			if (responseBuffer.size() + bytesRead > MAX_MESSAGE_SIZE)
+			if (responseBuffer.size() + bytesRead > maxResponseSize)
 			{
-				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", MAX_MESSAGE_SIZE);
+				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", maxResponseSize);
 				break;
 			}
 			responseBuffer.append(tempBuffer, bytesRead);
 		}
-	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < MAX_MESSAGE_SIZE);
+	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < maxResponseSize);
 
 	if (!responseBuffer.empty())
 	{
@@ -726,9 +718,10 @@ void RdpProvider::_CheckForIncomingMessages()
 	}
 	
 	// Security check: limit maximum message size to prevent DoS
-	if (bytesAvailable > MAX_MESSAGE_SIZE)
+	const DWORD maxMessageSize = 64 * 1024; // 64KB limit
+	if (bytesAvailable > maxMessageSize)
 	{
-		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, MAX_MESSAGE_SIZE);
+		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, maxMessageSize);
 		_DisconnectFromDesktopClient();
 		return;
 	}
@@ -743,14 +736,10 @@ void RdpProvider::_CheckForIncomingMessages()
 		buffer[bytesRead] = '\0';
 		g_log.Write("Received message from desktop client: %s", buffer);
 
-		// Parse the trigger login message using JSON
-		try
+		// Parse the trigger login message
+		if (strstr(buffer, "\"$type\":\"triggerloginrequest\""))
 		{
-			nlohmann::json msg = nlohmann::json::parse(buffer);
-			
-			if (msg.contains("$type") && msg["$type"] == TRIGGER_LOGIN_MESSAGE_TYPE)
-			{
-				g_log.Write("Processing TriggerLoginRequest - requesting credentials");
+			g_log.Write("Processing TriggerLoginRequest - requesting credentials");
 			
 			// Request credentials from desktop client immediately
 			PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
@@ -794,11 +783,6 @@ void RdpProvider::_CheckForIncomingMessages()
 				CoTaskMemFree(pwzPassword);
 			}
 			if (pwzDomain) CoTaskMemFree(pwzDomain);
-			}
-		}
-		catch (const nlohmann::json::exception& e)
-		{
-			g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
 		}
 	}
 	else
@@ -857,7 +841,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		return false;
 	}
 
-	if (responseLen > MAX_MESSAGE_SIZE)
+	if (responseLen > 64 * 1024) // 64KB limit
 	{
 		g_log.Write("ERROR: ParseCredentialResponse - input too large (%zu bytes)", responseLen);
 		return false;
@@ -870,127 +854,104 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 	SecureZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
 	_bHasStoredCredentials = false;
 
-	// Check if the response indicates success
-	if (strstr(jsonResponse, "\"Success\":false"))
+	try
 	{
-		g_log.Write("ERROR: Credential response indicates failure");
-		return false;
-	}
-
-	g_log.Write("DEBUG: Credential response indicates success, parsing fields");
-
-	// Parse the JSON response (simple parsing)
-	const char* username_start = strstr(jsonResponse, "\"Username\":\"");
-	const char* password_start = strstr(jsonResponse, "\"Password\":\"");
-	const char* domain_start = strstr(jsonResponse, "\"Domain\":\"");
-	
-	g_log.Write("DEBUG: Field positions - Username: %p, Password: %p, Domain: %p", 
-		username_start, password_start, domain_start);
-	
-	if (username_start && password_start)
-	{
-		// Extract username
-		username_start += USERNAME_FIELD_PREFIX_LEN; // Skip "Username":"
-		const char* username_end = strchr(username_start, '"');
-		if (username_end)
+		// Parse JSON with nlohmann/json
+		nlohmann::json response = nlohmann::json::parse(jsonResponse);
+		
+		// Check if the response indicates success
+		bool success = response.value("Success", false);
+		if (!success)
 		{
-			size_t username_len = username_end - username_start;
-			g_log.Write("DEBUG: Extracting username - length: %zu", username_len);
-			
+			std::string errorMsg = response.value("ErrorMessage", "Unknown error");
+			g_log.Write("ERROR: Credential response indicates failure: %s", errorMsg.c_str());
+			return false;
+		}
+
+		g_log.Write("DEBUG: Credential response indicates success, parsing fields");
+
+		// Extract fields using proper JSON parsing
+		std::string username = response.value("Username", "");
+		std::string password = response.value("Password", "");
+		std::string domain = response.value("Domain", "");
+
+		// Convert username to wide string
+		if (!username.empty())
+		{
 			size_t max_username_chars = sizeof(_wszStoredUsername)/sizeof(WCHAR) - 1;
-			if (username_len > max_username_chars) {
-				g_log.Write("WARNING: Username length (%zu) exceeds buffer size (%zu), truncating", username_len, max_username_chars);
-				username_len = max_username_chars;
-			}
-			
-			int converted = MultiByteToWideChar(CP_UTF8, 0, username_start, (int)username_len, _wszStoredUsername, (int)max_username_chars);
-			if (converted == 0) {
-				g_log.Write("ERROR: MultiByteToWideChar failed for username extraction (GetLastError: %lu)", GetLastError());
+			int converted = MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, _wszStoredUsername, (int)max_username_chars);
+			if (converted == 0)
+			{
+				g_log.Write("ERROR: MultiByteToWideChar failed for username (GetLastError: %lu)", GetLastError());
 				_wszStoredUsername[0] = L'\0';
-			} else {
-				_wszStoredUsername[converted] = L'\0'; // Ensure null-termination
+			}
+			else
+			{
 				g_log.Write("DEBUG: Extracted username: %ws", _wszStoredUsername);
 			}
 		}
 		else
 		{
-			g_log.Write("ERROR: Could not find end of username field");
+			_wszStoredUsername[0] = L'\0';
+			g_log.Write("DEBUG: Username field is empty");
 		}
-		
-		// Extract password
-		password_start += PASSWORD_FIELD_PREFIX_LEN; // Skip "Password":"
-		const char* password_end = strchr(password_start, '"');
-		if (password_end)
+
+		// Convert password to wide string
+		if (!password.empty())
 		{
-			size_t password_len = password_end - password_start;
-			g_log.Write("DEBUG: Extracting password - length: %zu", password_len);
-			
-			// Calculate max bytes to convert based on buffer size
-			int max_wchars = (int)(sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1);
-			// Worst case: each UTF-8 byte could be one WCHAR, so cap input length
-			if ((int)password_len > max_wchars) {
-				g_log.Write("WARNING: Password length exceeds buffer size, truncating");
-				password_len = max_wchars;
-			}
-			
-			int converted = MultiByteToWideChar(CP_UTF8, 0, password_start, (int)password_len, _wszStoredPassword, max_wchars);
-			if (converted == 0) {
-				g_log.Write("ERROR: MultiByteToWideChar failed for password extraction (GetLastError: %lu)", GetLastError());
+			size_t max_password_chars = sizeof(_wszStoredPassword)/sizeof(WCHAR) - 1;
+			int converted = MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, _wszStoredPassword, (int)max_password_chars);
+			if (converted == 0)
+			{
+				g_log.Write("ERROR: MultiByteToWideChar failed for password (GetLastError: %lu)", GetLastError());
 				_wszStoredPassword[0] = L'\0';
-			} else {
-				_wszStoredPassword[converted] = L'\0'; // Ensure null-termination
+			}
+			else
+			{
 				g_log.Write("DEBUG: Password extracted (length: %zu characters)", wcslen(_wszStoredPassword));
 			}
 		}
 		else
 		{
-			g_log.Write("ERROR: Could not find end of password field");
+			_wszStoredPassword[0] = L'\0';
+			g_log.Write("DEBUG: Password field is empty");
 		}
-		
-		// Extract domain (optional)
-		if (domain_start)
+
+		// Convert domain to wide string
+		if (!domain.empty())
 		{
-			domain_start += DOMAIN_FIELD_PREFIX_LEN; // Skip "Domain":"
-			const char* domain_end = strchr(domain_start, '"');
-			if (domain_end && domain_start != domain_end)
+			size_t max_domain_chars = sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1;
+			int converted = MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, _wszStoredDomain, (int)max_domain_chars);
+			if (converted == 0)
 			{
-				size_t domain_len = domain_end - domain_start;
-				g_log.Write("DEBUG: Extracting domain - length: %zu", domain_len);
-				
-				size_t max_domain_len = sizeof(_wszStoredDomain)/sizeof(WCHAR) - 1;
-				if (domain_len > max_domain_len) {
-					g_log.Write("WARNING: Domain field too long (%zu), truncating to %zu characters", domain_len, max_domain_len);
-					domain_len = max_domain_len;
-				}
-				
-				int domain_chars = MultiByteToWideChar(CP_UTF8, 0, domain_start, (int)domain_len, _wszStoredDomain, (int)max_domain_len);
-				if (domain_chars == 0) {
-					_wszStoredDomain[0] = L'\0';
-					g_log.Write("ERROR: Failed to convert domain to wide char (MultiByteToWideChar failed)");
-				} else {
-					_wszStoredDomain[domain_chars] = L'\0';
-					g_log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
-				}
+				g_log.Write("ERROR: MultiByteToWideChar failed for domain (GetLastError: %lu)", GetLastError());
+				_wszStoredDomain[0] = L'\0';
 			}
 			else
 			{
-				g_log.Write("DEBUG: Domain field is empty or malformed");
+				g_log.Write("DEBUG: Extracted domain: %ws", _wszStoredDomain);
 			}
 		}
 		else
 		{
-			g_log.Write("DEBUG: No domain field found in response");
+			_wszStoredDomain[0] = L'\0';
+			g_log.Write("DEBUG: Domain field is empty or malformed");
 		}
-		
+
+		// Mark credentials as available
 		_bHasStoredCredentials = true;
+		
 		g_log.Write("DEBUG: Successfully parsed all credentials - _bHasStoredCredentials set to true");
 		g_log.Write("DEBUG: Final stored credentials - User: %ws, Domain: %ws, Password: [%zu chars]", 
 			_wszStoredUsername, _wszStoredDomain, wcslen(_wszStoredPassword));
+
 		return true;
 	}
-
-	g_log.Write("ERROR: Failed to find username and password fields in credential response");
-	return false;
+	catch (const nlohmann::json::exception& e)
+	{
+		g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
+		return false;
+	}
 }
 
 void RdpProvider::_StartBackgroundMessageThread()

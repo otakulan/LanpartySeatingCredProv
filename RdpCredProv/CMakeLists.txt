@@ -27,4 +27,4 @@ windows_rc_generate_version_info(
 
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-target_link_libraries(RdpCredProv secur32 shlwapi)
+target_link_libraries(RdpCredProv secur32 shlwapi nlohmann_json::nlohmann_json)

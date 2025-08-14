@@ -1,8 +1,4 @@
 {
-  "name": "lanpartyseating-credprov",
-  "version": "1.0.0",
-  "description": "LanpartySeating Credential Provider for Windows",
-  "homepage": "https://github.com/otakulan/LanpartySeatingCredProv",
   "dependencies": [
     "nlohmann-json"
   ]
