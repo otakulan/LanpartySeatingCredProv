@@ -102,7 +102,7 @@ jobs:
             $PackageVersion = '${{ needs.preflight.outputs.package-version }}'
             $MsvcArch = @{"x86"="Win32";"x64"="x64";"arm64"="ARM64"}[$Arch]
             vcpkg install --triplet "$Arch-windows"
-            cmake -G "Visual Studio 17 2022" -A $MsvcArch -B $BuildDir
+            cmake -G "Visual Studio 17 2022" -A $MsvcArch -B $BuildDir -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET="$Arch-windows"
             cmake --build $BuildDir --config Release
             Compress-Archive "$BuildDir\bin\Release\*" ".\package\RdpCredProv-$PackageVersion-$Arch.zip" -CompressionLevel Optimal
           }
