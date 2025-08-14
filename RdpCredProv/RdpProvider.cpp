@@ -8,7 +8,14 @@
 #include <shlobj.h>
 #include <strsafe.h>
 #include <string>
+#include <algorithm>
 #include <nlohmann/json.hpp>
+
+// Constants for robust JSON parsing and message handling
+static const DWORD MAX_RESPONSE_SIZE = 64 * 1024; // 64KB limit for security
+static const size_t USERNAME_FIELD_PREFIX_LEN = strlen("\"Username\":\"");
+static const size_t PASSWORD_FIELD_PREFIX_LEN = strlen("\"Password\":\"");
+static const size_t DOMAIN_FIELD_PREFIX_LEN = strlen("\"Domain\":\"");
 
 CLogFile g_log;
 
@@ -617,7 +624,6 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 	// Read the response with a timeout and size limit
 	std::string responseBuffer;
 	const DWORD chunkSize = 1024;
-	const DWORD maxResponseSize = 64 * 1024; // 64KB limit for security
 	DWORD bytesRead = 0;
 	char tempBuffer[chunkSize];
 	BOOL readResult = FALSE;
@@ -627,14 +633,14 @@ HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* p
 		if (readResult && bytesRead > 0)
 		{
 			// Check size limit to prevent DoS
-			if (responseBuffer.size() + bytesRead > maxResponseSize)
+			if (responseBuffer.size() + bytesRead > MAX_RESPONSE_SIZE)
 			{
-				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", maxResponseSize);
+				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", MAX_RESPONSE_SIZE);
 				break;
 			}
 			responseBuffer.append(tempBuffer, bytesRead);
 		}
-	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < maxResponseSize);
+	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < MAX_RESPONSE_SIZE);
 
 	if (!responseBuffer.empty())
 	{
@@ -718,10 +724,9 @@ void RdpProvider::_CheckForIncomingMessages()
 	}
 	
 	// Security check: limit maximum message size to prevent DoS
-	const DWORD maxMessageSize = 64 * 1024; // 64KB limit
-	if (bytesAvailable > maxMessageSize)
+	if (bytesAvailable > MAX_RESPONSE_SIZE)
 	{
-		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, maxMessageSize);
+		g_log.Write("ERROR: Incoming message size (%d bytes) exceeds maximum allowed (%d bytes), disconnecting", bytesAvailable, MAX_RESPONSE_SIZE);
 		_DisconnectFromDesktopClient();
 		return;
 	}
@@ -736,24 +741,32 @@ void RdpProvider::_CheckForIncomingMessages()
 		buffer[bytesRead] = '\0';
 		g_log.Write("Received message from desktop client: %s", buffer);
 
-		// Parse the trigger login message
-		if (strstr(buffer, "\"$type\":\"triggerloginrequest\""))
+		// Parse the trigger login message using proper JSON parsing
+		try 
 		{
-			g_log.Write("Processing TriggerLoginRequest - requesting credentials");
+			nlohmann::json message = nlohmann::json::parse(buffer);
+			std::string messageType = message.value("$type", "");
 			
-			// Request credentials from desktop client immediately
-			PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
-			HRESULT hrRequest = _RequestCredentialsFromClient(&pwzUsername, &pwzPassword, &pwzDomain);
+			// Case-insensitive comparison for message type
+			std::transform(messageType.begin(), messageType.end(), messageType.begin(), ::tolower);
 			
-			if (SUCCEEDED(hrRequest))
+			if (messageType == "triggerloginrequest")
 			{
-				g_log.Write("Successfully received credentials from desktop client");
-				if (_dwNumCreds > 0 && _rgpCredentials[0])
+				g_log.Write("Processing TriggerLoginRequest - requesting credentials");
+				
+				// Request credentials from desktop client immediately
+				PWSTR pwzUsername = nullptr, pwzPassword = nullptr, pwzDomain = nullptr;
+				HRESULT hrRequest = _RequestCredentialsFromClient(&pwzUsername, &pwzPassword, &pwzDomain);
+				
+				if (SUCCEEDED(hrRequest))
 				{
-					HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(pwzUsername, pwzPassword, pwzDomain);
-					if (SUCCEEDED(hrUpdate))
+					g_log.Write("Successfully received credentials from desktop client");
+					if (_dwNumCreds > 0 && _rgpCredentials[0])
 					{
-						g_log.Write("Successfully updated RdpCredential with new credentials");
+						HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(pwzUsername, pwzPassword, pwzDomain);
+						if (SUCCEEDED(hrUpdate))
+						{
+							g_log.Write("Successfully updated RdpCredential with new credentials");
 						if (_pCredentialProviderEvents)
 						{
 							_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
@@ -783,6 +796,11 @@ void RdpProvider::_CheckForIncomingMessages()
 				CoTaskMemFree(pwzPassword);
 			}
 			if (pwzDomain) CoTaskMemFree(pwzDomain);
+			}
+		}
+		catch (const nlohmann::json::exception& e)
+		{
+			g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
 		}
 	}
 	else
@@ -841,7 +859,7 @@ bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
 		return false;
 	}
 
-	if (responseLen > 64 * 1024) // 64KB limit
+	if (responseLen > MAX_RESPONSE_SIZE) // 64KB limit
 	{
 		g_log.Write("ERROR: ParseCredentialResponse - input too large (%zu bytes)", responseLen);
 		return false;
