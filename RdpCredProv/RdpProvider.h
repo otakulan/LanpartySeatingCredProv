@@ -4,6 +4,9 @@
 #include <strsafe.h>
 #include <optional>
 #include <string>
+#include <stdexcept>
+#include <memory>
+
 
 #include "RdpCredential.h"
 #include "helpers.h"
@@ -79,25 +82,26 @@ private:
 	HRESULT _EnumerateCredentials();
 	void _CleanupSetSerialization();
 	HRESULT _ConnectToDesktopClient();
-	HRESULT _RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* ppwzPassword, PWSTR* ppwzDomain);
 	void _DisconnectFromDesktopClient();
 	void _CheckForIncomingMessages();
-	void _StartBackgroundMessageThread();
+	HRESULT _StartBackgroundMessageThread();
 	void _StopBackgroundMessageThread();
 	static DWORD WINAPI _BackgroundMessageThreadProc(LPVOID lpParam);
 	
 	// JSON Message builders for strongly typed communication
 	void _BuildCredentialProviderConnectedMessage(char* buffer, size_t bufferSize);
-	void _BuildCredentialRequestMessage(char* buffer, size_t bufferSize);
-	bool ParseCredentialResponse(const char* jsonResponse);
 	
 	// Helper functions for credential storage refactoring
 	bool HasStoredCredentials() const;
-	void StoreCredentials(const std::wstring& username, const std::wstring& password, const std::wstring& domain);
+	// rvalue reference to ensure we don't accidentally make copies
+	void StoreCredentials(std::wstring&& username, std::wstring&& password, std::wstring&& domain);
 	void ClearCredentials();
-	PCWSTR GetStoredUsername() const;
-	PCWSTR GetStoredPassword() const;
-	PCWSTR GetStoredDomain() const;
+	
+	// Return reference to stored credentials - throws exception if not available
+	std::shared_ptr<StoredCredentials> GetStoredCredentials() const;
+	
+	// convert std::string to CoTaskMalloc allocated string
+	std::wstring toWideString(std::string_view) const;
 
 private:
 	LONG _cRef;
@@ -118,16 +122,13 @@ private:
 	HANDLE _hPipe;
 	
 	// Stored credentials from desktop client
-	std::optional<StoredCredentials> _storedCredentials;
-	
-	// Legacy credential storage (maintained for backwards compatibility during transition)
-	WCHAR _wszStoredUsername[256];
-	WCHAR _wszStoredPassword[256];
-	WCHAR _wszStoredDomain[256];
-	bool _bHasStoredCredentials;
+	std::shared_ptr<StoredCredentials> _storedCredentials;
 	
 	// Background message checking thread
 	HANDLE _hMessageThread;
 	HANDLE _hStopEvent;
 	bool _bThreadRunning;
+	
+	// Thread synchronization for credential storage
+	mutable CRITICAL_SECTION _credentialsCriticalSection;
 };

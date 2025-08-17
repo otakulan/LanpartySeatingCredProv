@@ -37,11 +37,6 @@ RdpProvider::RdpProvider():
 	DllAddRef();
 
 	ZeroMemory(_rgpCredentials, sizeof(_rgpCredentials));
-	ZeroMemory(_wszStoredUsername, sizeof(_wszStoredUsername));
-	ZeroMemory(_wszStoredPassword, sizeof(_wszStoredPassword));
-	ZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
-	_bHasStoredCredentials = false;
-	// _storedCredentials is automatically initialized as empty std::optional
 
 	HKEY hKey;
 	DWORD cbSize;
@@ -181,59 +176,57 @@ HRESULT RdpProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, D
 
 STDMETHODIMP RdpProvider::SetSerialization(const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs)
 {
-	HRESULT hr = E_INVALIDARG;
-
 	g_log.Write("RdpProvider::SetSerialization");
 
-	if ((CLSID_RdpProvider == pcpcs->clsidCredentialProvider))
+	if (CLSID_RdpProvider != pcpcs->clsidCredentialProvider)
 	{
-		ULONG ulAuthPackage;
-		hr = RetrieveNegotiateAuthPackage(&ulAuthPackage);
+		return E_INVALIDARG;
+	}
 
-		if (SUCCEEDED(hr))
+	ULONG ulAuthPackage;
+	HRESULT hr = RetrieveNegotiateAuthPackage(&ulAuthPackage);
+	if (FAILED(hr))
+	{
+		return E_INVALIDARG;
+	}
+
+	if (ulAuthPackage != pcpcs->ulAuthenticationPackage || 
+		pcpcs->cbSerialization == 0 || 
+		pcpcs->rgbSerialization == nullptr)
+	{
+		return E_INVALIDARG;
+	}
+
+	KERB_INTERACTIVE_UNLOCK_LOGON* pkil = (KERB_INTERACTIVE_UNLOCK_LOGON*)pcpcs->rgbSerialization;
+	if (KerbInteractiveLogon != pkil->Logon.MessageType)
+	{
+		return E_INVALIDARG;
+	}
+
+	BYTE* rgbSerialization = (BYTE*)HeapAlloc(GetProcessHeap(), 0, pcpcs->cbSerialization);
+	if (!rgbSerialization)
+	{
+		return E_OUTOFMEMORY;
+	}
+
+	CopyMemory(rgbSerialization, pcpcs->rgbSerialization, pcpcs->cbSerialization);
+	KerbInteractiveUnlockLogonUnpackInPlace((KERB_INTERACTIVE_UNLOCK_LOGON*)rgbSerialization);
+
+	if (_pkiulSetSerialization)
+	{
+		HeapFree(GetProcessHeap(), 0, _pkiulSetSerialization);
+
+		if ((_dwSetSerializationCred != CREDENTIAL_PROVIDER_NO_DEFAULT) && (_dwSetSerializationCred == _dwNumCreds - 1))
 		{
-			if ((ulAuthPackage == pcpcs->ulAuthenticationPackage) && (0 < pcpcs->cbSerialization && pcpcs->rgbSerialization))
-			{
-				KERB_INTERACTIVE_UNLOCK_LOGON* pkil = (KERB_INTERACTIVE_UNLOCK_LOGON*) pcpcs->rgbSerialization;
-
-				if (KerbInteractiveLogon == pkil->Logon.MessageType)
-				{
-					BYTE* rgbSerialization;
-					rgbSerialization = (BYTE*) HeapAlloc(GetProcessHeap(), 0, pcpcs->cbSerialization);
-					hr = rgbSerialization ? S_OK : E_OUTOFMEMORY;
-
-					if (SUCCEEDED(hr))
-					{
-						CopyMemory(rgbSerialization, pcpcs->rgbSerialization, pcpcs->cbSerialization);
-						KerbInteractiveUnlockLogonUnpackInPlace((KERB_INTERACTIVE_UNLOCK_LOGON*) rgbSerialization);
-
-						if (_pkiulSetSerialization)
-						{
-							HeapFree(GetProcessHeap(), 0, _pkiulSetSerialization);
-
-							if ((_dwSetSerializationCred != CREDENTIAL_PROVIDER_NO_DEFAULT) && (_dwSetSerializationCred == _dwNumCreds - 1))
-							{
-								_rgpCredentials[_dwSetSerializationCred]->Release();
-								_rgpCredentials[_dwSetSerializationCred] = NULL;
-								_dwNumCreds--;
-								_dwSetSerializationCred = CREDENTIAL_PROVIDER_NO_DEFAULT;
-							}
-						}
-
-						_pkiulSetSerialization = (KERB_INTERACTIVE_UNLOCK_LOGON*) rgbSerialization;
-
-						hr = S_OK;
-					}
-				}
-			}
-		}
-		else
-		{
-			hr = E_INVALIDARG;
+			_rgpCredentials[_dwSetSerializationCred]->Release();
+			_rgpCredentials[_dwSetSerializationCred] = NULL;
+			_dwNumCreds--;
+			_dwSetSerializationCred = CREDENTIAL_PROVIDER_NO_DEFAULT;
 		}
 	}
 
-	return hr;
+	_pkiulSetSerialization = (KERB_INTERACTIVE_UNLOCK_LOGON*)rgbSerialization;
+	return S_OK;
 }
 
 HRESULT RdpProvider::Advise(__in ICredentialProviderEvents* pcpe, UINT_PTR upAdviseContext)
@@ -261,7 +254,12 @@ HRESULT RdpProvider::Advise(__in ICredentialProviderEvents* pcpe, UINT_PTR upAdv
 	// Start a background thread to continuously check for messages
 	// This ensures we receive trigger messages even when GetCredentialCount isn't called frequently
 	g_log.Write("DEBUG: Starting background message checking thread");
-	_StartBackgroundMessageThread();
+	HRESULT hrThread = _StartBackgroundMessageThread();
+	if (FAILED(hrThread))
+	{
+		g_log.Write("WARNING: Failed to start background message thread - error: 0x%08X", hrThread);
+		// Continue anyway as this is not critical for basic functionality
+	}
 	
 	g_log.Write("DEBUG: Advise completed - continuous message checking active");
 
@@ -310,14 +308,10 @@ HRESULT RdpProvider::GetFieldDescriptorAt(DWORD dwIndex, __deref_out CREDENTIAL_
 HRESULT RdpProvider::GetCredentialCount(__out DWORD* pdwCount, __out DWORD* pdwDefault, __out BOOL* pbAutoLogonWithDefault)
 {
 	HRESULT hr = S_OK;
-
-	// Check for incoming messages from desktop client
-	_CheckForIncomingMessages();
-
-	// ALWAYS return 1 credential to keep Winlogon polling
+	// ALWAYS return 1 credential
 	*pdwCount = 1;
 	*pdwDefault = 0;
-	*pbAutoLogonWithDefault = HasStoredCredentials() ? TRUE : FALSE;
+	*pbAutoLogonWithDefault = HasStoredCredentials();
 
 	return hr;
 }
@@ -326,24 +320,85 @@ HRESULT RdpProvider::GetCredentialAt(DWORD dwIndex, __out ICredentialProviderCre
 {
 	HRESULT hr;
 
-	if ((dwIndex < _dwNumCreds) && ppcpc)
+	if (dwIndex >= 1 || !ppcpc) // We always have exactly 1 credential
 	{
-		hr = _rgpCredentials[dwIndex]->QueryInterface(IID_ICredentialProviderCredential, reinterpret_cast<void**>(ppcpc));
-	}
-	else
-	{
-		hr = E_INVALIDARG;
+		return E_INVALIDARG;
 	}
 
+	// Check if we have new credentials that require updating the credential tile
+	// This allows dynamic credential updates without touching _rgpCredentials from background thread
+	const auto storedCreds = GetStoredCredentials();
+	bool needsUpdate = false;
+
+	if (!_rgpCredentials[0])
+	{
+		// No credential object exists yet, create one
+		needsUpdate = true;
+		g_log.Write("DEBUG: GetCredentialAt - no existing credential, creating new one");
+	}
+	else if (storedCreds)
+	{
+		// We have stored credentials, check if credential object needs updating
+		// For simplicity, we'll recreate the credential when we have new stored credentials
+		// A more sophisticated approach would track if credentials actually changed
+		needsUpdate = true;
+		g_log.Write("DEBUG: GetCredentialAt - stored credentials available, updating credential object");
+	}
+
+	if (needsUpdate)
+	{
+		// Clean up existing credential
+		if (_rgpCredentials[0])
+		{
+			_rgpCredentials[0]->Release();
+			_rgpCredentials[0] = NULL;
+		}
+
+		// Create new credential with current stored credentials
+		RdpCredential* ppc = new RdpCredential();
+		if (!ppc)
+		{
+			return E_OUTOFMEMORY;
+		}
+
+		LPCWSTR pwzUser = L"";
+		LPCWSTR pwzPassword = L"";
+		LPCWSTR pwzDomain = L"";
+
+		if (storedCreds)
+		{
+			pwzUser = storedCreds->username.c_str();
+			pwzPassword = storedCreds->password.c_str();
+			pwzDomain = storedCreds->domain.c_str();
+			g_log.Write("DEBUG: GetCredentialAt - using stored credentials for new credential object");
+		}
+		else
+		{
+			g_log.Write("DEBUG: GetCredentialAt - creating placeholder credential object");
+		}
+
+		hr = ppc->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, 
+			pwzUser, pwzPassword, pwzDomain);
+
+		if (FAILED(hr))
+		{
+			ppc->Release();
+			return hr;
+		}
+
+		_rgpCredentials[0] = ppc;
+		_dwNumCreds = 1;
+		g_log.Write("DEBUG: GetCredentialAt - created fresh credential object");
+	}
+
+	// Return the credential object
+	hr = _rgpCredentials[0]->QueryInterface(IID_ICredentialProviderCredential, reinterpret_cast<void**>(ppcpc));
 	return hr;
 }
 
 HRESULT RdpProvider::_EnumerateCredentials()
 {
-    HRESULT hr = S_OK;
-    DWORD dwCredentialIndex = 0;
-    
-    g_log.Write("DEBUG: _EnumerateCredentials called - HasStoredCredentials: %s", HasStoredCredentials() ? "true" : "false");
+    g_log.Write("DEBUG: _EnumerateCredentials called - initializing credential provider");
 
 	// Clean up any existing credentials first
 	for (size_t i = 0; i < _dwNumCreds; i++)
@@ -356,77 +411,25 @@ HRESULT RdpProvider::_EnumerateCredentials()
 	}
 	_dwNumCreds = 0;
 
-	// ALWAYS create at least one credential tile to keep Winlogon interested
-	// This is the correct Microsoft pattern - never return 0 credentials or Winlogon stops calling
-	g_log.Write("DEBUG: Creating credential tile (required to maintain Winlogon polling)");
+	// Set up for one credential slot - GetCredentialAt will create the actual credential object
+	// when Windows requests it, ensuring it has the most current stored credentials
+	_dwNumCreds = 1;
+	_rgpCredentials[0] = NULL; // Will be created lazily in GetCredentialAt
 	
-	if (_bRemoteOnly && !GetSystemMetrics(SM_REMOTESESSION)) {
-		g_log.Write("DEBUG: RemoteOnly mode but not in remote session - still creating placeholder");
-	}
-	
-	RdpCredential* ppc = new RdpCredential();
-	if (ppc)
-	{
-		LPCWSTR pwzUser = L"";
-		LPCWSTR pwzPassword = L"";
-		LPCWSTR pwzDomain = L"";
-
-		if (HasStoredCredentials())
-		{
-			// Use credentials from desktop client (received via trigger message)
-			pwzUser = GetStoredUsername();
-			pwzPassword = GetStoredPassword();
-			pwzDomain = GetStoredDomain();
-			g_log.Write("DEBUG: Using stored credentials from desktop client - User: %ws", pwzUser);
-		}
-		else
-		{
-			// Create empty/placeholder credential to keep Winlogon polling
-			// This ensures GetCredentialCount continues to be called
-			g_log.Write("DEBUG: Creating placeholder credential to maintain Winlogon polling");
-		}
-
-		hr = ppc->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, 
-			pwzUser, pwzPassword, pwzDomain);
-
-		if (SUCCEEDED(hr))
-		{
-			_rgpCredentials[dwCredentialIndex] = ppc;
-			_dwNumCreds++;
-			g_log.Write("DEBUG: Successfully created credential tile - _dwNumCreds: %d", _dwNumCreds);
-		}
-		else
-		{
-			ppc->Release();
-			g_log.Write("ERROR: Failed to initialize credential - HRESULT: 0x%08X", hr);
-		}
-	}
-	else
-	{
-		hr = E_OUTOFMEMORY;
-		g_log.Write("ERROR: Failed to allocate credential object");
-	}
-
-    g_log.Write("DEBUG: _EnumerateCredentials completed - _dwNumCreds: %d, hr: 0x%08X", _dwNumCreds, hr);
-    return hr;
+	g_log.Write("DEBUG: _EnumerateCredentials completed - prepared for 1 credential (lazy creation)");
+    return S_OK;
 }
 
 HRESULT RdpProvider_CreateInstance(REFIID riid, __deref_out void** ppv)
 {
-	HRESULT hr;
-
 	RdpProvider* pProvider = new RdpProvider();
-
-	if (pProvider)
+	if (!pProvider)
 	{
-		hr = pProvider->QueryInterface(riid, ppv);
-		pProvider->Release();
-	}
-	else
-	{
-		hr = E_OUTOFMEMORY;
+		return E_OUTOFMEMORY;
 	}
 
+	HRESULT hr = pProvider->QueryInterface(riid, ppv);
+	pProvider->Release();
 	return hr;
 }
 
@@ -438,7 +441,8 @@ HRESULT RdpProvider::_EnumerateSetSerialization()
 
 	_bAutoSubmitSetSerializationCred = false;
 
-	if (_bRemoteOnly && !GetSystemMetrics(SM_REMOTESESSION)) {
+	if (_bRemoteOnly && !GetSystemMetrics(SM_REMOTESESSION)) 
+	{
 		return E_FAIL;
 	}
 
@@ -446,43 +450,44 @@ HRESULT RdpProvider::_EnumerateSetSerialization()
 	WCHAR wszPassword[MAX_PATH] = { 0 };
 
 	HRESULT hr = StringCbCopyNW(wszUsername, sizeof(wszUsername), pkil->UserName.Buffer, pkil->UserName.Length);
-
-	if (SUCCEEDED(hr))
+	if (FAILED(hr))
 	{
-		hr = StringCbCopyNW(wszPassword, sizeof(wszPassword), pkil->Password.Buffer, pkil->Password.Length);
-
-		if (SUCCEEDED(hr))
-		{
-			RdpCredential* pCred = new RdpCredential();
-
-			if (pCred)
-			{
-				hr = pCred->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, wszUsername, wszPassword);
-
-				if (SUCCEEDED(hr))
-				{
-					_rgpCredentials[_dwNumCreds] = pCred;
-					_dwSetSerializationCred = _dwNumCreds;
-					_dwNumCreds++;
-				}
-			}
-			else
-			{
-				hr = E_OUTOFMEMORY;
-			}
-
-			if (SUCCEEDED(hr) && (0 < wcslen(wszPassword)))
-			{
-				_bAutoSubmitSetSerializationCred = true;
-			}
-		}
+		return hr;
 	}
 
-	return hr;
+	hr = StringCbCopyNW(wszPassword, sizeof(wszPassword), pkil->Password.Buffer, pkil->Password.Length);
+	if (FAILED(hr))
+	{
+		return hr;
+	}
+
+	RdpCredential* pCred = new RdpCredential();
+	if (!pCred)
+	{
+		return E_OUTOFMEMORY;
+	}
+
+	hr = pCred->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, wszUsername, wszPassword);
+	if (FAILED(hr))
+	{
+		delete pCred;
+		return hr;
+	}
+
+	_rgpCredentials[_dwNumCreds] = pCred;
+	_dwSetSerializationCred = _dwNumCreds;
+	_dwNumCreds++;
+
+	if (wcslen(wszPassword) > 0)
+	{
+		_bAutoSubmitSetSerializationCred = true;
+	}
+
+	return S_OK;
 }
 
 HRESULT RdpProvider::_ConnectToDesktopClient()
-{
+{	
 	g_log.Write("DEBUG: _ConnectToDesktopClient called - current pipe handle: %p", _hPipe);
 
 	if (_hPipe != INVALID_HANDLE_VALUE)
@@ -552,152 +557,11 @@ void RdpProvider::_DisconnectFromDesktopClient()
 	else
 	{
 		g_log.Write("DEBUG: Pipe handle was already INVALID_HANDLE_VALUE - nothing to close");
-	}
-}
-
-HRESULT RdpProvider::_RequestCredentialsFromClient(PWSTR* ppwzUsername, PWSTR* ppwzPassword, PWSTR* ppwzDomain)
-{
-	g_log.Write("DEBUG: _RequestCredentialsFromClient called");
-	g_log.Write("DEBUG: Current HasStoredCredentials: %s", HasStoredCredentials() ? "true" : "false");
-
-	// If we already have stored credentials, return them
-	if (HasStoredCredentials())
-	{
-		g_log.Write("DEBUG: Using existing stored credentials");
-		size_t userLen = wcslen(GetStoredUsername()) + 1;
-		size_t passLen = wcslen(GetStoredPassword()) + 1;
-		size_t domainLen = wcslen(GetStoredDomain()) + 1;
-
-		*ppwzUsername = (PWSTR)CoTaskMemAlloc(userLen * sizeof(WCHAR));
-		*ppwzPassword = (PWSTR)CoTaskMemAlloc(passLen * sizeof(WCHAR));
-		*ppwzDomain = (PWSTR)CoTaskMemAlloc(domainLen * sizeof(WCHAR));
-
-		if (*ppwzUsername && *ppwzPassword && *ppwzDomain)
-		{
-			wcscpy_s(*ppwzUsername, userLen, GetStoredUsername());
-			wcscpy_s(*ppwzPassword, passLen, GetStoredPassword());
-			wcscpy_s(*ppwzDomain, domainLen, GetStoredDomain());
-			g_log.Write("DEBUG: Successfully returned existing stored credentials");
-			return S_OK;
-		}
-		else
-		{
-			g_log.Write("ERROR: Failed to allocate memory for credential strings");
-			return E_OUTOFMEMORY;
-		}
-	}
-
-	g_log.Write("DEBUG: No stored credentials, requesting from desktop client");
-	g_log.Write("DEBUG: Current pipe handle: %p", _hPipe);
-
-	// Otherwise, request credentials from the desktop client
-	if (_hPipe == INVALID_HANDLE_VALUE)
-	{
-		g_log.Write("DEBUG: Pipe not connected, attempting connection");
-		HRESULT hr = _ConnectToDesktopClient();
-		if (FAILED(hr))
-		{
-			g_log.Write("ERROR: Failed to connect to desktop client for credential request - HRESULT: 0x%08X", hr);
-			return hr;
-		}
-		g_log.Write("DEBUG: Connection successful, pipe handle now: %p", _hPipe);
-	}
-
-	// Send credential request using proper JSON message
-	char credentialRequest[512];
-	_BuildCredentialRequestMessage(credentialRequest, sizeof(credentialRequest));
-	
-	g_log.Write("DEBUG: Sending credential request: %s", credentialRequest);
-	
-	DWORD bytesWritten;
-	if (!WriteFile(_hPipe, credentialRequest, (DWORD)strlen(credentialRequest), &bytesWritten, NULL))
-	{
-		DWORD dwError = GetLastError();
-		g_log.Write("ERROR: Failed to send credential request to desktop client - error: %d", dwError);
-		return E_FAIL;
-	}
-
-	g_log.Write("DEBUG: Successfully sent credential request - %d bytes written", bytesWritten);
-
-	// Read the response with a timeout and size limit
-	std::string responseBuffer;
-	constexpr DWORD chunkSize = 1024;
-	DWORD bytesRead = 0;
-	BOOL readResult = FALSE;
-	DWORD lastReadError = ERROR_SUCCESS;  // Capture ReadFile error immediately
-	do
-	{
-		char tempBuffer[chunkSize];
-		ZeroMemory(tempBuffer, chunkSize);  // Zero the buffer for security
-		readResult = ReadFile(_hPipe, tempBuffer, chunkSize, &bytesRead, NULL);
-		if (!readResult)
-		{
-			lastReadError = GetLastError();  // Capture error immediately after ReadFile fails
-		}
-		
-		if (readResult && bytesRead > 0)
-		{
-			// Check size limit to prevent DoS
-			if (responseBuffer.size() + bytesRead > MAX_RESPONSE_SIZE)
-			{
-				g_log.Write("ERROR: Response size exceeds maximum allowed (%d bytes), terminating read", MAX_RESPONSE_SIZE);
-				break;
-			}
-			responseBuffer.append(tempBuffer, bytesRead);
-		}
-	} while (readResult && bytesRead == chunkSize && responseBuffer.size() < MAX_RESPONSE_SIZE);
-
-	if (!responseBuffer.empty())
-	{
-		// Ensure null-termination for C-string compatibility
-		responseBuffer.push_back('\0');
-		g_log.Write("DEBUG: Received credential response (%zu bytes): %s", responseBuffer.size() - 1, responseBuffer.c_str());
-
-		// Parse the JSON response to extract credentials
-		if (ParseCredentialResponse(responseBuffer.c_str()))
-		{
-			g_log.Write("DEBUG: Successfully parsed credential response");
-			g_log.Write("DEBUG: HasStoredCredentials is now: %s", HasStoredCredentials() ? "true" : "false");
-			
-			// Return the newly stored credentials
-			size_t userLen = wcslen(GetStoredUsername()) + 1;
-			size_t passLen = wcslen(GetStoredPassword()) + 1;
-			size_t domainLen = wcslen(GetStoredDomain()) + 1;
-
-			*ppwzUsername = (PWSTR)CoTaskMemAlloc(userLen * sizeof(WCHAR));
-			*ppwzPassword = (PWSTR)CoTaskMemAlloc(passLen * sizeof(WCHAR));
-			*ppwzDomain = (PWSTR)CoTaskMemAlloc(domainLen * sizeof(WCHAR));
-
-			if (*ppwzUsername && *ppwzPassword && *ppwzDomain)
-			{
-				wcscpy_s(*ppwzUsername, userLen, GetStoredUsername());
-				wcscpy_s(*ppwzPassword, passLen, GetStoredPassword());
-				wcscpy_s(*ppwzDomain, domainLen, GetStoredDomain());
-				g_log.Write("DEBUG: Successfully returned newly received credentials");
-				return S_OK;
-			}
-			else
-			{
-				g_log.Write("ERROR: Failed to allocate memory for credential return strings");
-				return E_OUTOFMEMORY;
-			}
-		}
-		else
-		{
-			g_log.Write("ERROR: Failed to parse credential response");
-		}
-	}
-	else
-	{
-		g_log.Write("ERROR: Failed to read credential response - error: %d", lastReadError);
-	}
-
-	g_log.Write("ERROR: Failed to get credentials from desktop client");
-	return E_FAIL;
+	}	
 }
 
 void RdpProvider::_CheckForIncomingMessages()
-{
+{	
 	if (_hPipe == INVALID_HANDLE_VALUE)
 	{
 		// Try to reconnect periodically
@@ -705,7 +569,11 @@ void RdpProvider::_CheckForIncomingMessages()
 		DWORD currentTime = GetTickCount();
 		if ((currentTime - lastReconnectAttempt) > 5000) // Try reconnect every 5 seconds
 		{
-			_ConnectToDesktopClient();
+			HRESULT hr = _ConnectToDesktopClient();
+			if (FAILED(hr))
+			{
+				g_log.Write("DEBUG: Periodic reconnection attempt failed - error: 0x%08X", hr);
+			}
 			lastReconnectAttempt = currentTime;
 		}
 		return;
@@ -740,92 +608,74 @@ void RdpProvider::_CheckForIncomingMessages()
 	DWORD bytesRead = 0;
 	result = ReadFile(_hPipe, buffer.data(), bytesAvailable, &bytesRead, NULL);
 
-	if (result && bytesRead > 0)
-	{
-		buffer[bytesRead] = '\0';
-		g_log.Write("Received message from desktop client: %s", buffer.data());
-
-		// Parse the trigger login message using proper JSON parsing
-		try 
-		{
-			nlohmann::json message = nlohmann::json::parse(buffer.data());
-			std::string messageType = message.value("$type", "");
-			
-			// Case-insensitive comparison for message type
-			std::transform(messageType.begin(), messageType.end(), messageType.begin(), ::tolower);
-			
-			if (messageType == "triggerloginrequest")
-			{
-				g_log.Write("Processing TriggerLoginRequest with embedded credentials");
-				
-				// Extract credentials directly from the trigger message
-				std::string username = message.value("Username", "");
-				std::string password = message.value("Password", "");
-				std::string domain = "";
-				
-				// Handle domain field which can be null in JSON
-				if (message.contains("Domain") && !message["Domain"].is_null())
-				{
-					domain = message["Domain"].get<std::string>();
-				}
-				
-				if (username.empty())
-				{
-					g_log.Write("ERROR: TriggerLoginRequest missing username");
-					return;
-				}
-				
-				g_log.Write("Received credentials in trigger message - Username: %s, Domain: %s, Password length: %zu", 
-					username.c_str(), domain.empty() ? "local" : domain.c_str(), password.length());
-				
-				// Convert to wide strings for Windows API
-				std::wstring wUsername(username.begin(), username.end());
-				std::wstring wPassword(password.begin(), password.end());
-				std::wstring wDomain(domain.begin(), domain.end());
-				
-				// Store credentials using modern approach
-				StoreCredentials(wUsername, wPassword, wDomain);
-				g_log.Write("Successfully stored credentials from trigger message");
-				
-				// Update existing credential tile if available
-				if (_dwNumCreds > 0 && _rgpCredentials[0])
-				{
-					HRESULT hrUpdate = _rgpCredentials[0]->UpdateCredentials(wUsername.c_str(), wPassword.c_str(), wDomain.c_str());
-					if (SUCCEEDED(hrUpdate))
-					{
-						g_log.Write("Successfully updated RdpCredential with new credentials from trigger");
-						
-						// Notify Windows that credentials have changed
-						if (_pCredentialProviderEvents)
-						{
-							_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
-							g_log.Write("Notified Windows of credential changes");
-						}
-						else
-						{
-							g_log.Write("WARNING: No credential provider events available to notify of changes");
-						}
-					}
-					else
-					{
-						g_log.Write("ERROR: Failed to update RdpCredential - HRESULT: 0x%08X", hrUpdate);
-					}
-				}
-				else
-				{
-					g_log.Write("WARNING: No credential tiles available to update");
-				}
-			}
-		}
-		catch (const nlohmann::json::exception& e)
-		{
-			g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
-		}
-	}
-	else
+	if (!result || bytesRead == 0)
 	{
 		DWORD dwError = GetLastError();
 		g_log.Write("ERROR: Failed to read from pipe - error: %d", dwError);
+		return;
+	}
+
+	buffer[bytesRead] = '\0';
+	g_log.Write("Received message from desktop client: %s", buffer.data());
+
+	// Parse the trigger login message using proper JSON parsing
+	try 
+	{
+		nlohmann::json message = nlohmann::json::parse(buffer.data());
+		std::string messageType = message.value("$type", "");
+		
+		// Case-insensitive comparison for message type
+		std::transform(messageType.begin(), messageType.end(), messageType.begin(), ::tolower);
+		
+		if (messageType != "triggerloginrequest")
+		{
+			return; // Not a trigger login request, ignore
+		}
+
+		g_log.Write("Processing TriggerLoginRequest with embedded credentials");
+		
+		// Extract credentials directly from the trigger message
+		std::string username = message.value("Username", "");
+		std::string password = message.value("Password", "");
+		std::string domain = "";
+		
+		// Handle domain field which can be null in JSON
+		if (message.contains("Domain") && !message["Domain"].is_null())
+		{
+			domain = message["Domain"].get<std::string>();
+		}
+		
+		if (username.empty())
+		{
+			g_log.Write("ERROR: TriggerLoginRequest missing username");
+			return;
+		}
+		
+		g_log.Write("Received credentials in trigger message - Username: %s, Domain: %s, Password length: %zu", 
+			username.c_str(), domain.empty() ? "local" : domain.c_str(), password.length());
+		
+
+		// Store credentials using modern approach
+		StoreCredentials(toWideString(username), toWideString(password), toWideString(domain));
+		g_log.Write("Successfully stored credentials from trigger message");
+		
+		// Don't update _rgpCredentials from background thread - GetCredentialAt will handle
+		// creating fresh credential objects when Windows queries after CredentialsChanged
+
+		// Notify Windows that credentials have changed
+		if (!_pCredentialProviderEvents)
+		{
+			g_log.Write("WARNING: No credential provider events available to notify of changes");
+			return;
+		}
+
+		_pCredentialProviderEvents->CredentialsChanged(_upAdviseContext);
+		g_log.Write("Notified Windows of credential changes");
+	}
+	catch (const nlohmann::json::exception& e)
+	{
+		g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
+		g_log.Write("The json that failed to parse: %s", buffer.data());
 	}
 
 	// std::vector automatically cleans up memory when it goes out of scope
@@ -845,175 +695,39 @@ void RdpProvider::_BuildCredentialProviderConnectedMessage(char* buffer, size_t 
 	);
 }
 
-void RdpProvider::_BuildCredentialRequestMessage(char* buffer, size_t bufferSize)
-{
-	sprintf_s(buffer, bufferSize, 
-		"{"
-		"\"$type\":\"credentialrequest\","
-		"\"ProcessId\":%d,"
-		"\"Timestamp\":%lld"
-		"}\n",
-		GetCurrentProcessId(),
-		GetTickCount64()
-	);
-}
-
-bool RdpProvider::ParseCredentialResponse(const char* jsonResponse)
-{
-	g_log.Write("DEBUG: ParseCredentialResponse called with: %s", jsonResponse ? jsonResponse : "NULL");
-
-	// Validate input parameter
-	if (!jsonResponse)
-	{
-		g_log.Write("ERROR: ParseCredentialResponse called with NULL pointer");
-		return false;
-	}
-
-	// Validate input length to prevent potential issues
-	size_t responseLen = strlen(jsonResponse);
-	if (responseLen == 0)
-	{
-		g_log.Write("ERROR: ParseCredentialResponse called with empty string");
-		return false;
-	}
-
-	if (responseLen > MAX_RESPONSE_SIZE) // 64KB limit
-	{
-		g_log.Write("ERROR: ParseCredentialResponse - input too large (%zu bytes)", responseLen);
-		return false;
-	}
-
-	// Clear existing credentials
-	g_log.Write("DEBUG: Clearing existing stored credentials");
-	ClearCredentials();
-
-	try
-	{
-		// Parse JSON with nlohmann/json
-		nlohmann::json response = nlohmann::json::parse(jsonResponse);
-		
-		// Check if the response indicates success
-		bool success = response.value("Success", false);
-		if (!success)
-		{
-			std::string errorMsg = response.value("ErrorMessage", "Unknown error");
-			g_log.Write("ERROR: Credential response indicates failure: %s", errorMsg.c_str());
-			return false;
-		}
-
-		g_log.Write("DEBUG: Credential response indicates success, parsing fields");
-
-		// Extract fields using proper JSON parsing
-		std::string username = response.value("Username", "");
-		std::string password = response.value("Password", "");
-		std::string domain = response.value("Domain", "");
-
-		// Convert to wide strings for storage
-		std::wstring wUsername, wPassword, wDomain;
-		
-		if (!username.empty())
-		{
-			int len = MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, nullptr, 0);
-			if (len > 0)
-			{
-				wUsername.resize(len - 1);
-				MultiByteToWideChar(CP_UTF8, 0, username.c_str(), -1, &wUsername[0], len);
-				g_log.Write("DEBUG: Extracted username: %ws", wUsername.c_str());
-			}
-			else
-			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for username (GetLastError: %lu)", GetLastError());
-			}
-		}
-		else
-		{
-			g_log.Write("DEBUG: Username field is empty");
-		}
-
-		if (!password.empty())
-		{
-			int len = MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, nullptr, 0);
-			if (len > 0)
-			{
-				wPassword.resize(len - 1);
-				MultiByteToWideChar(CP_UTF8, 0, password.c_str(), -1, &wPassword[0], len);
-				g_log.Write("DEBUG: Password extracted (length: %zu characters)", wPassword.length());
-			}
-			else
-			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for password (GetLastError: %lu)", GetLastError());
-			}
-		}
-		else
-		{
-			g_log.Write("DEBUG: Password field is empty");
-		}
-
-		if (!domain.empty())
-		{
-			int len = MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, nullptr, 0);
-			if (len > 0)
-			{
-				wDomain.resize(len - 1);
-				MultiByteToWideChar(CP_UTF8, 0, domain.c_str(), -1, &wDomain[0], len);
-				g_log.Write("DEBUG: Extracted domain: %ws", wDomain.c_str());
-			}
-			else
-			{
-				g_log.Write("ERROR: MultiByteToWideChar failed for domain (GetLastError: %lu)", GetLastError());
-			}
-		}
-		else
-		{
-			g_log.Write("DEBUG: Domain field is empty or malformed");
-		}
-
-		// Store credentials using the new structured approach
-		StoreCredentials(wUsername, wPassword, wDomain);
-		
-		g_log.Write("DEBUG: Successfully parsed all credentials");
-		g_log.Write("DEBUG: Final stored credentials - User: %ws, Domain: %ws, Password: [%zu chars]", 
-			wUsername.c_str(), wDomain.c_str(), wPassword.length());
-
-		return true;
-	}
-	catch (const nlohmann::json::exception& e)
-	{
-		g_log.Write("ERROR: Failed to parse JSON message: %s", e.what());
-		return false;
-	}
-}
-
-void RdpProvider::_StartBackgroundMessageThread()
+HRESULT RdpProvider::_StartBackgroundMessageThread()
 {
 	g_log.Write("DEBUG: _StartBackgroundMessageThread called");
 	
 	if (_bThreadRunning)
 	{
 		g_log.Write("DEBUG: Background thread already running");
-		return;
+		return S_OK;
 	}
 
 	// Create stop event
 	_hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 	if (!_hStopEvent)
 	{
-		g_log.Write("ERROR: Failed to create stop event for background thread");
-		return;
+		DWORD error = GetLastError();
+		g_log.Write("ERROR: Failed to create stop event for background thread - error: %d", error);
+		return HRESULT_FROM_WIN32(error);
 	}
 
 	// Create background thread
 	_hMessageThread = CreateThread(NULL, 0, _BackgroundMessageThreadProc, this, 0, NULL);
 	if (!_hMessageThread)
 	{
-		g_log.Write("ERROR: Failed to create background message thread");
+		DWORD error = GetLastError();
+		g_log.Write("ERROR: Failed to create background message thread - error: %d", error);
 		CloseHandle(_hStopEvent);
 		_hStopEvent = NULL;
-		return;
+		return HRESULT_FROM_WIN32(error);
 	}
 
 	_bThreadRunning = true;
 	g_log.Write("DEBUG: Background message thread started successfully");
+	return S_OK;
 }
 
 void RdpProvider::_StopBackgroundMessageThread()
@@ -1065,7 +779,11 @@ DWORD WINAPI RdpProvider::_BackgroundMessageThreadProc(LPVOID lpParam)
 	if (pProvider->_hPipe == INVALID_HANDLE_VALUE)
 	{
 		g_log.Write("DEBUG: Background thread attempting initial connection");
-		pProvider->_ConnectToDesktopClient();
+		HRESULT hr = pProvider->_ConnectToDesktopClient();
+		if (FAILED(hr))
+		{
+			g_log.Write("DEBUG: Background thread initial connection failed - error: 0x%08X", hr);
+		}
 	}
 
 	while (pProvider->_bThreadRunning)
@@ -1090,51 +808,27 @@ DWORD WINAPI RdpProvider::_BackgroundMessageThreadProc(LPVOID lpParam)
 // Helper functions for credential storage refactoring
 bool RdpProvider::HasStoredCredentials() const
 {
-	return _storedCredentials.has_value();
+	return _storedCredentials.get() != nullptr;
 }
 
-void RdpProvider::StoreCredentials(const std::wstring& username, const std::wstring& password, const std::wstring& domain)
+void RdpProvider::StoreCredentials(std::wstring&& username, std::wstring&& password, std::wstring&& domain)
 {
-	_storedCredentials = StoredCredentials{ username, password, domain };
-	
-	// Keep legacy fields in sync during transition
-	_bHasStoredCredentials = true;
-	wcsncpy_s(_wszStoredUsername, username.c_str(), _TRUNCATE);
-	wcsncpy_s(_wszStoredPassword, password.c_str(), _TRUNCATE);
-	wcsncpy_s(_wszStoredDomain, domain.c_str(), _TRUNCATE);
+	_storedCredentials = std::make_shared<StoredCredentials>(StoredCredentials{ std::move(username), std::move(password), std::move(domain) });
 }
 
 void RdpProvider::ClearCredentials()
 {
 	_storedCredentials.reset();
-	
-	// Keep legacy fields in sync during transition
-	_bHasStoredCredentials = false;
-	SecureZeroMemory(_wszStoredUsername, sizeof(_wszStoredUsername));
-	SecureZeroMemory(_wszStoredPassword, sizeof(_wszStoredPassword));
-	SecureZeroMemory(_wszStoredDomain, sizeof(_wszStoredDomain));
 }
 
-PCWSTR RdpProvider::GetStoredUsername() const
+std::shared_ptr<StoredCredentials> RdpProvider::GetStoredCredentials() const
 {
-	if (_storedCredentials.has_value()) {
-		return _storedCredentials->username.c_str();
-	}
-	return nullptr;
+	return _storedCredentials;
 }
 
-PCWSTR RdpProvider::GetStoredPassword() const
-{
-	if (_storedCredentials.has_value()) {
-		return _storedCredentials->password.c_str();
-	}
-	return nullptr;
-}
-
-PCWSTR RdpProvider::GetStoredDomain() const
-{
-	if (_storedCredentials.has_value()) {
-		return _storedCredentials->domain.c_str();
-	}
-	return nullptr;
+std::wstring RdpProvider::toWideString(std::string_view str) const {
+	size_t size = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), NULL, 0);
+	std::wstring wstr(size, L'\0'); // Preallocate size
+	MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), wstr.data(), static_cast<int>(size));
+	return wstr;
 }
