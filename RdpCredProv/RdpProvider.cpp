@@ -356,10 +356,6 @@ HRESULT RdpProvider::GetCredentialAt(DWORD dwIndex, __out ICredentialProviderCre
 
 		// Create new credential with current stored credentials
 		RdpCredential* ppc = new RdpCredential();
-		if (!ppc)
-		{
-			return E_OUTOFMEMORY;
-		}
 
 		LPCWSTR pwzUser = L"";
 		LPCWSTR pwzPassword = L"";
@@ -423,11 +419,6 @@ HRESULT RdpProvider::_EnumerateCredentials()
 HRESULT RdpProvider_CreateInstance(REFIID riid, __deref_out void** ppv)
 {
 	RdpProvider* pProvider = new RdpProvider();
-	if (!pProvider)
-	{
-		return E_OUTOFMEMORY;
-	}
-
 	HRESULT hr = pProvider->QueryInterface(riid, ppv);
 	pProvider->Release();
 	return hr;
@@ -462,11 +453,6 @@ HRESULT RdpProvider::_EnumerateSetSerialization()
 	}
 
 	RdpCredential* pCred = new RdpCredential();
-	if (!pCred)
-	{
-		return E_OUTOFMEMORY;
-	}
-
 	hr = pCred->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, wszUsername, wszPassword);
 	if (FAILED(hr))
 	{
@@ -487,7 +473,7 @@ HRESULT RdpProvider::_EnumerateSetSerialization()
 }
 
 HRESULT RdpProvider::_ConnectToDesktopClient()
-{	
+{
 	g_log.Write("DEBUG: _ConnectToDesktopClient called - current pipe handle: %p", _hPipe);
 
 	if (_hPipe != INVALID_HANDLE_VALUE)
@@ -522,14 +508,12 @@ HRESULT RdpProvider::_ConnectToDesktopClient()
 	g_log.Write("DEBUG: Successfully connected to desktop client pipe - handle: %p", _hPipe);
 
 	// Send a registration message so the desktop client knows we're here
-	char registerMessage[512];
-	_BuildCredentialProviderConnectedMessage(registerMessage, sizeof(registerMessage));
-	
-	g_log.Write("DEBUG: Sending registration message: %s", registerMessage);
-	
+	std::string registerMessage = _BuildCredentialProviderConnectedMessage();
+	g_log.Write("DEBUG: Sending registration message: %s", registerMessage.c_str());
+
 	DWORD bytesWritten;
-	BOOL writeResult = WriteFile(_hPipe, registerMessage, (DWORD)strlen(registerMessage), &bytesWritten, NULL);
-	
+	BOOL writeResult = WriteFile(_hPipe, registerMessage.c_str(), (DWORD)registerMessage.length(), &bytesWritten, NULL);
+
 	if (writeResult)
 	{
 		g_log.Write("DEBUG: Successfully sent registration message - %d bytes written", bytesWritten);
@@ -561,7 +545,7 @@ void RdpProvider::_DisconnectFromDesktopClient()
 }
 
 void RdpProvider::_CheckForIncomingMessages()
-{	
+{
 	if (_hPipe == INVALID_HANDLE_VALUE)
 	{
 		// Try to reconnect periodically
@@ -682,17 +666,13 @@ void RdpProvider::_CheckForIncomingMessages()
 }
 
 // JSON Message builders for strongly typed communication with C# desktop client
-void RdpProvider::_BuildCredentialProviderConnectedMessage(char* buffer, size_t bufferSize)
+std::string RdpProvider::_BuildCredentialProviderConnectedMessage()
 {
-	sprintf_s(buffer, bufferSize, 
-		"{"
-		"\"$type\":\"credentialproviderconnected\","
-		"\"ProcessId\":%d,"
-		"\"Timestamp\":%lld"
-		"}\n",
-		GetCurrentProcessId(),
-		GetTickCount64()
-	);
+	nlohmann::json message;
+	message["$type"] = "credentialproviderconnected";
+	message["ProcessId"] = GetCurrentProcessId();
+	message["Timestamp"] = GetTickCount64();
+	return message.dump();
 }
 
 HRESULT RdpProvider::_StartBackgroundMessageThread()

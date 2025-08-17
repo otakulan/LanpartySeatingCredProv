@@ -89,7 +89,7 @@ private:
 	static DWORD WINAPI _BackgroundMessageThreadProc(LPVOID lpParam);
 	
 	// JSON Message builders for strongly typed communication
-	void _BuildCredentialProviderConnectedMessage(char* buffer, size_t bufferSize);
+	std::string _BuildCredentialProviderConnectedMessage();
 	
 	// Helper functions for credential storage refactoring
 	bool HasStoredCredentials() const;
@@ -128,7 +128,4 @@ private:
 	HANDLE _hMessageThread;
 	HANDLE _hStopEvent;
 	bool _bThreadRunning;
-	
-	// Thread synchronization for credential storage
-	mutable CRITICAL_SECTION _credentialsCriticalSection;
 };
