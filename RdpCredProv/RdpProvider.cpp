@@ -587,17 +587,44 @@ void RdpProvider::_CheckForIncomingMessages()
 		return;
 	}
 	
-	// Allocate buffer based on bytesAvailable, with space for null terminator
-	std::vector<char> buffer(bytesAvailable + 1);
+	// Use fixed-size buffer to avoid allocation based on untrusted data
+	const DWORD BUFFER_SIZE = 4096; // 4KB fixed buffer
+	std::vector<char> buffer;
+	buffer.reserve(bytesAvailable + 1); // Reserve space but don't allocate yet
+	
+	DWORD totalBytesRead = 0;
 	DWORD bytesRead = 0;
-	result = ReadFile(_hPipe, buffer.data(), bytesAvailable, &bytesRead, NULL);
-
-	if (!result || bytesRead == 0)
+	
+	// Read data in chunks to avoid large allocations from untrusted bytesAvailable
+	while (totalBytesRead < bytesAvailable)
 	{
-		DWORD dwError = GetLastError();
-		g_log.Write("ERROR: Failed to read from pipe - error: %d", dwError);
-		return;
+		char tempBuffer[BUFFER_SIZE];
+		DWORD bytesToRead = min(BUFFER_SIZE, bytesAvailable - totalBytesRead);
+		
+		BOOL result = ReadFile(_hPipe, tempBuffer, bytesToRead, &bytesRead, NULL);
+		
+		if (!result || bytesRead == 0)
+		{
+			DWORD dwError = GetLastError();
+			g_log.Write("ERROR: Failed to read from pipe - error: %d", dwError);
+			return;
+		}
+		
+		// Append to our buffer
+		buffer.insert(buffer.end(), tempBuffer, tempBuffer + bytesRead);
+		totalBytesRead += bytesRead;
+		
+		// Safety check: if we've read more than expected, something is wrong
+		if (totalBytesRead > bytesAvailable)
+		{
+			g_log.Write("ERROR: Read more bytes than expected, disconnecting");
+			_DisconnectFromDesktopClient();
+			return;
+		}
 	}
+	
+	// Ensure null termination
+	buffer.push_back('\0');
 
 	buffer[bytesRead] = '\0';
 	g_log.Write("Received message from desktop client: %s", buffer.data());
@@ -808,7 +835,18 @@ std::shared_ptr<StoredCredentials> RdpProvider::GetStoredCredentials() const
 
 std::wstring RdpProvider::toWideString(std::string_view str) const {
 	size_t size = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), NULL, 0);
+	if (size == 0) {
+		// Conversion failed or empty string
+		return std::wstring();
+	}
+	
 	std::wstring wstr(size, L'\0'); // Preallocate size
-	MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), wstr.data(), static_cast<int>(size));
+	size_t converted = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), wstr.data(), static_cast<int>(size));
+	
+	if (converted == 0) {
+		// Conversion failed
+		return std::wstring();
+	}
+	
 	return wstr;
 }

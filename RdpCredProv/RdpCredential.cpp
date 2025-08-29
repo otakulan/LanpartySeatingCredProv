@@ -29,12 +29,8 @@ RdpCredential::~RdpCredential()
 	if (_rgFieldStrings[SFI_PASSWORD])
 	{
 		size_t lenPassword;
-		HRESULT hr = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &(lenPassword));
-
-		if (SUCCEEDED(hr))
-		{
-			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
-		}
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
 	}
 
 	for (int i = 0; i < ARRAYSIZE(_rgFieldStrings); i++)
@@ -102,7 +98,7 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
 	}
 
-	return S_OK;
+	return hr;
 }
 
 HRESULT RdpCredential::UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword, PCWSTR pwzDomain)
@@ -117,17 +113,14 @@ HRESULT RdpCredential::UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword,
 		CoTaskMemFree(_rgFieldStrings[SFI_USERNAME]);
 		_rgFieldStrings[SFI_USERNAME] = NULL;
 	}
+	hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
-		if (SUCCEEDED(hr))
-		{
-			g_log.Write("DEBUG: Updated username field: %ws", _rgFieldStrings[SFI_USERNAME]);
-		}
-		else
-		{
-			g_log.Write("ERROR: Failed to update username field - HRESULT: 0x%08X", hr);
-		}
+		g_log.Write("DEBUG: Updated username field: %ws", _rgFieldStrings[SFI_USERNAME]);
+	}
+	else
+	{
+		g_log.Write("ERROR: Failed to update username field - HRESULT: 0x%08X", hr);
 	}
 
 	// Update password
@@ -135,11 +128,8 @@ HRESULT RdpCredential::UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword,
 	{
 		// Securely clear existing password
 		size_t lenPassword;
-		HRESULT hrLen = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &lenPassword);
-		if (SUCCEEDED(hrLen))
-		{
-			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(WCHAR));
-		}
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(WCHAR));
 		CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
 		_rgFieldStrings[SFI_PASSWORD] = NULL;
 	}
@@ -226,15 +216,11 @@ HRESULT RdpCredential::SetDeselected()
 	if (_rgFieldStrings[SFI_PASSWORD])
 	{
 		size_t lenPassword;
-		hr = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &(lenPassword));
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
 
-		if (SUCCEEDED(hr))
-		{
-			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
-
-			CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
-			hr = SHStrDupW(L"", &_rgFieldStrings[SFI_PASSWORD]);
-		}
+		CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+		hr = SHStrDupW(L"", &_rgFieldStrings[SFI_PASSWORD]);
 
 		if (SUCCEEDED(hr) && _pCredProvCredentialEvents)
 		{

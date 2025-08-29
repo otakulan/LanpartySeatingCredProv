@@ -127,6 +127,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDll, DWORD dwReason, LPVOID pReserved)
 	{
 		case DLL_PROCESS_ATTACH:
 			DisableThreadLibraryCalls(hinstDll);
+			g_hinst = hinstDll;
 			break;
 		case DLL_PROCESS_DETACH:
 		case DLL_THREAD_ATTACH:
@@ -134,7 +135,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDll, DWORD dwReason, LPVOID pReserved)
 			break;
 	}
 
-	g_hinst = hinstDll;
 	return TRUE;
 }
 
