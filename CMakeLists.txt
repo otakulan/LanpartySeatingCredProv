@@ -6,6 +6,9 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(CMakePackageConfigHelpers)
 
+# Find nlohmann_json package from vcpkg
+find_package(nlohmann_json CONFIG REQUIRED)
+
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERSION_STRINGS)
 list(GET VERSION_STRINGS 0 VERSION_STRING)
 

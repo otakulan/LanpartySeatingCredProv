@@ -7,7 +7,8 @@
 #include "RdpCredential.h"
 #include "guid.h"
 
-extern CLogFile log;
+extern CLogFile g_log;
+extern HINSTANCE g_hinst;
 
 RdpCredential::RdpCredential():
 	_cRef(1),
@@ -24,19 +25,12 @@ RdpCredential::RdpCredential():
 
 RdpCredential::~RdpCredential()
 {
+	// Securely clear password field if it exists
 	if (_rgFieldStrings[SFI_PASSWORD])
 	{
 		size_t lenPassword;
-		HRESULT hr = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &(lenPassword));
-
-		if (SUCCEEDED(hr))
-		{
-			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
-		}
-		else
-		{
-
-		}
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
 	}
 
 	for (int i = 0; i < ARRAYSIZE(_rgFieldStrings); i++)
@@ -54,7 +48,7 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 {
 	HRESULT hr = S_OK;
 
-	log.Write("RdpCredential::Initialize");
+	g_log.Write("RdpCredential::Initialize");
 
 	_cpus = cpus;
 
@@ -64,9 +58,29 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 		hr = FieldDescriptorCopy(rgcpfd[i], &_rgCredProvFieldDescriptors[i]);
 	}
 	
+	// Initialize text field strings - extract from the copied field descriptors
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(pwzUsername, &_rgFieldStrings[SFI_USERNAME]);
+		// Tile image has no string value
+		hr = SHStrDupW(L"", &_rgFieldStrings[SFI_TILEIMAGE]);
+	}
+	
+	if (SUCCEEDED(hr))
+	{
+		// Main text field - use the label from the copied field descriptor
+		hr = SHStrDupW(_rgCredProvFieldDescriptors[SFI_MAIN_TEXT].pszLabel, &_rgFieldStrings[SFI_MAIN_TEXT]);
+	}
+
+	if (SUCCEEDED(hr))
+	{
+		// Help text field - use the label from the copied field descriptor
+		hr = SHStrDupW(_rgCredProvFieldDescriptors[SFI_HELP_TEXT].pszLabel, &_rgFieldStrings[SFI_HELP_TEXT]);
+	}
+
+	// Initialize hidden credential fields
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
 	}
 	
 	if (SUCCEEDED(hr))
@@ -76,20 +90,88 @@ HRESULT RdpCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
+		hr = SHStrDupW(L"Submit", &_rgFieldStrings[SFI_SUBMIT_BUTTON]);
 	}
 
 	if (SUCCEEDED(hr))
 	{
-		hr = SHStrDupW(L"Submit", &_rgFieldStrings[SFI_SUBMIT_BUTTON]);
+		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
 	}
 
-	return S_OK;
+	return hr;
+}
+
+HRESULT RdpCredential::UpdateCredentials(PCWSTR pwzUsername, PCWSTR pwzPassword, PCWSTR pwzDomain)
+{
+	HRESULT hr = S_OK;
+
+	g_log.Write("DEBUG: RdpCredential::UpdateCredentials called - Username: %ws", pwzUsername ? pwzUsername : L"NULL");
+
+	// Update username
+	if (_rgFieldStrings[SFI_USERNAME])
+	{
+		CoTaskMemFree(_rgFieldStrings[SFI_USERNAME]);
+		_rgFieldStrings[SFI_USERNAME] = NULL;
+	}
+	hr = SHStrDupW(pwzUsername ? pwzUsername : L"", &_rgFieldStrings[SFI_USERNAME]);
+	if (SUCCEEDED(hr))
+	{
+		g_log.Write("DEBUG: Updated username field: %ws", _rgFieldStrings[SFI_USERNAME]);
+	}
+	else
+	{
+		g_log.Write("ERROR: Failed to update username field - HRESULT: 0x%08X", hr);
+	}
+
+	// Update password
+	if (_rgFieldStrings[SFI_PASSWORD])
+	{
+		// Securely clear existing password
+		size_t lenPassword;
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(WCHAR));
+		CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+		_rgFieldStrings[SFI_PASSWORD] = NULL;
+	}
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzPassword ? pwzPassword : L"", &_rgFieldStrings[SFI_PASSWORD]);
+		if (SUCCEEDED(hr))
+		{
+			g_log.Write("DEBUG: Updated password field (length: %zu chars)", pwzPassword ? wcslen(pwzPassword) : 0);
+		}
+		else
+		{
+			g_log.Write("ERROR: Failed to update password field - HRESULT: 0x%08X", hr);
+		}
+	}
+
+	// Update domain
+	if (pwszDomain)
+	{
+		CoTaskMemFree(pwszDomain);
+		pwszDomain = NULL;
+	}
+	if (SUCCEEDED(hr))
+	{
+		hr = SHStrDupW(pwzDomain ? pwzDomain : L"", &pwszDomain);
+		if (SUCCEEDED(hr))
+		{
+			g_log.Write("DEBUG: Updated domain field: %ws", pwszDomain);
+		}
+		else
+		{
+			g_log.Write("ERROR: Failed to update domain field - HRESULT: 0x%08X", hr);
+		}
+	}
+
+	g_log.Write("DEBUG: RdpCredential::UpdateCredentials completed - HRESULT: 0x%08X", hr);
+	return hr;
 }
 
 HRESULT RdpCredential::Advise(ICredentialProviderCredentialEvents* pcpce)
 {
-	log.Write("RdpCredential::Advise");
+	g_log.Write("RdpCredential::Advise");
 
 	if (_pCredProvCredentialEvents)
 	{
@@ -104,7 +186,7 @@ HRESULT RdpCredential::Advise(ICredentialProviderCredentialEvents* pcpce)
 
 HRESULT RdpCredential::UnAdvise()
 {
-	log.Write("RdpCredential::UnAdvise");
+	g_log.Write("RdpCredential::UnAdvise");
 
 	if (_pCredProvCredentialEvents)
 	{
@@ -118,7 +200,7 @@ HRESULT RdpCredential::UnAdvise()
 
 HRESULT RdpCredential::SetSelected(BOOL* pbAutoLogon)  
 {
-	log.Write("RdpCredential::SetSelected");
+	g_log.Write("RdpCredential::SetSelected");
 
 	*pbAutoLogon = FALSE;
 
@@ -129,20 +211,16 @@ HRESULT RdpCredential::SetDeselected()
 {
 	HRESULT hr = S_OK;
 	
-	log.Write("RdpCredential::SetDeselected");
+	g_log.Write("RdpCredential::SetDeselected");
 
 	if (_rgFieldStrings[SFI_PASSWORD])
 	{
 		size_t lenPassword;
-		hr = StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], 128, &(lenPassword));
+		StringCchLengthW(_rgFieldStrings[SFI_PASSWORD], STRSAFE_MAX_CCH, &lenPassword);
+		SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
 
-		if (SUCCEEDED(hr))
-		{
-			SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], lenPassword * sizeof(*_rgFieldStrings[SFI_PASSWORD]));
-
-			CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
-			hr = SHStrDupW(L"", &_rgFieldStrings[SFI_PASSWORD]);
-		}
+		CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+		hr = SHStrDupW(L"", &_rgFieldStrings[SFI_PASSWORD]);
 
 		if (SUCCEEDED(hr) && _pCredProvCredentialEvents)
 		{
@@ -157,19 +235,25 @@ HRESULT RdpCredential::GetFieldState(DWORD dwFieldID, CREDENTIAL_PROVIDER_FIELD_
 {
 	HRESULT hr;
 
-	log.Write("RdpCredential::GetFieldState");
+	g_log.Write("RdpCredential::GetFieldState - Field ID: %d", dwFieldID);
 
-	if ((dwFieldID < ARRAYSIZE(_rgFieldStatePairs)) && pcpfs && pcpfis)
+	// Validate parameters and array bounds
+	if (!pcpfs || !pcpfis)
 	{
-		*pcpfs = _rgFieldStatePairs[dwFieldID].cpfs;
-		*pcpfis = _rgFieldStatePairs[dwFieldID].cpfis;
+		g_log.Write("ERROR: GetFieldState - Invalid parameters (pcpfs or pcpfis is NULL)");
+		return E_INVALIDARG;
+	}
 
-		hr = S_OK;
-	}
-	else
+	if (dwFieldID >= ARRAYSIZE(_rgFieldStatePairs))
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: GetFieldState - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgFieldStatePairs) - 1);
+		return E_INVALIDARG;
 	}
+
+	*pcpfs = _rgFieldStatePairs[dwFieldID].cpfs;
+	*pcpfis = _rgFieldStatePairs[dwFieldID].cpfis;
+
+	hr = S_OK;
 
 	return hr;
 }
@@ -178,16 +262,22 @@ HRESULT RdpCredential::GetStringValue(DWORD dwFieldID, PWSTR* ppwsz)
 {
 	HRESULT hr;
 
-	log.Write("RdpCredential::GetStringValue");
+	g_log.Write("RdpCredential::GetStringValue - Field ID: %d", dwFieldID);
 
-	if (dwFieldID < ARRAYSIZE(_rgCredProvFieldDescriptors) && ppwsz) 
+	// Validate parameters and array bounds
+	if (!ppwsz)
 	{
-		hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
+		g_log.Write("ERROR: GetStringValue - ppwsz is NULL");
+		return E_INVALIDARG;
 	}
-	else
+
+	if (dwFieldID >= ARRAYSIZE(_rgCredProvFieldDescriptors))
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: GetStringValue - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgCredProvFieldDescriptors) - 1);
+		return E_INVALIDARG;
 	}
+
+	hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
 
 	return hr;
 }
@@ -196,11 +286,11 @@ HRESULT RdpCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
 	HRESULT hr;
 
-	log.Write("RdpCredential::GetBitmapValue");
+	g_log.Write("RdpCredential::GetBitmapValue");
 
 	if ((SFI_TILEIMAGE == dwFieldID) && phbmp)
 	{
-		HBITMAP hbmp = LoadBitmap(HINST_THISDLL, MAKEINTRESOURCE(IDB_TILE_IMAGE));
+		HBITMAP hbmp = LoadBitmap(g_hinst, MAKEINTRESOURCE(IDB_TILE_IMAGE));
 
 		if (hbmp != NULL)
 		{
@@ -224,7 +314,7 @@ HRESULT RdpCredential::GetSubmitButtonValue(DWORD dwFieldID, DWORD* pdwAdjacentT
 {
 	HRESULT hr;
 
-	log.Write("RdpCredential::GetSubmitButtonValue");
+	g_log.Write("RdpCredential::GetSubmitButtonValue");
 
 	if ((SFI_SUBMIT_BUTTON == dwFieldID) && pdwAdjacentTo)
 	{
@@ -242,23 +332,36 @@ HRESULT RdpCredential::GetSubmitButtonValue(DWORD dwFieldID, DWORD* pdwAdjacentT
 HRESULT RdpCredential::SetStringValue(DWORD dwFieldID, PCWSTR pwz)
 {
 	HRESULT hr;
-	PSTR pz = NULL;
 
 	// don't log the value, because it can include typed credentials
-	log.Write("RdpCredential::SetStringValue: dwFieldID: %d", (int) dwFieldID);
+	g_log.Write("RdpCredential::SetStringValue: dwFieldID: %d", (int) dwFieldID);
 
-	if ((dwFieldID < ARRAYSIZE(_rgCredProvFieldDescriptors)) && 
-		(CPFT_EDIT_TEXT == _rgCredProvFieldDescriptors[dwFieldID].cpft || 
-		CPFT_PASSWORD_TEXT == _rgCredProvFieldDescriptors[dwFieldID].cpft)) 
+	// Validate array bounds
+	if (dwFieldID >= ARRAYSIZE(_rgCredProvFieldDescriptors))
 	{
-		PWSTR* ppwszStored = &_rgFieldStrings[dwFieldID];
-		CoTaskMemFree(*ppwszStored);
-		hr = SHStrDupW(pwz, ppwszStored);
+		g_log.Write("ERROR: SetStringValue - Field ID %d out of bounds (max: %d)", dwFieldID, ARRAYSIZE(_rgCredProvFieldDescriptors) - 1);
+		return E_INVALIDARG;
 	}
-	else
+
+	// Check if field type allows string setting
+	if (CPFT_EDIT_TEXT != _rgCredProvFieldDescriptors[dwFieldID].cpft && 
+		CPFT_PASSWORD_TEXT != _rgCredProvFieldDescriptors[dwFieldID].cpft)
 	{
-		hr = E_INVALIDARG;
+		g_log.Write("ERROR: SetStringValue - Field ID %d is not editable (type: %d)", dwFieldID, _rgCredProvFieldDescriptors[dwFieldID].cpft);
+		return E_INVALIDARG;
 	}
+
+	PWSTR* ppwszStored = &_rgFieldStrings[dwFieldID];
+	
+	// Securely clear existing password data
+	if (dwFieldID == SFI_PASSWORD && *ppwszStored)
+	{
+		size_t len = wcslen(*ppwszStored);
+		SecureZeroMemory(*ppwszStored, len * sizeof(WCHAR));
+	}
+	
+	CoTaskMemFree(*ppwszStored);
+	hr = SHStrDupW(pwz, ppwszStored);
 
 	return hr;
 }
@@ -269,7 +372,7 @@ HRESULT RdpCredential::GetCheckboxValue(DWORD dwFieldID, BOOL* pbChecked, PWSTR*
 	UNREFERENCED_PARAMETER(pbChecked);
 	UNREFERENCED_PARAMETER(ppwszLabel);
 
-	log.Write("RdpCredential::GetCheckboxValue");
+	g_log.Write("RdpCredential::GetCheckboxValue");
 
 	return E_NOTIMPL;
 }
@@ -280,7 +383,7 @@ HRESULT RdpCredential::GetComboBoxValueCount(DWORD dwFieldID, DWORD* pcItems, DW
 	UNREFERENCED_PARAMETER(pcItems);
 	UNREFERENCED_PARAMETER(pdwSelectedItem);
 
-	log.Write("RdpCredential::GetComboBoxValueCount");
+	g_log.Write("RdpCredential::GetComboBoxValueCount");
 
 	return E_NOTIMPL;
 }
@@ -291,7 +394,7 @@ HRESULT RdpCredential::GetComboBoxValueAt(DWORD dwFieldID, DWORD dwItem, PWSTR* 
 	UNREFERENCED_PARAMETER(dwItem);
 	UNREFERENCED_PARAMETER(ppwszItem);
 
-	log.Write("RdpCredential::GetComboBoxValueAt");
+	g_log.Write("RdpCredential::GetComboBoxValueAt");
 
 	return E_NOTIMPL;
 }
@@ -301,7 +404,7 @@ HRESULT RdpCredential::SetCheckboxValue(DWORD dwFieldID, BOOL bChecked)
 	UNREFERENCED_PARAMETER(dwFieldID);
 	UNREFERENCED_PARAMETER(bChecked);
 
-	log.Write("RdpCredential::SetCheckboxValue");
+	g_log.Write("RdpCredential::SetCheckboxValue");
 
 	return E_NOTIMPL;
 }
@@ -311,7 +414,7 @@ HRESULT RdpCredential::SetComboBoxSelectedValue(DWORD dwFieldId, DWORD dwSelecte
 	UNREFERENCED_PARAMETER(dwFieldId);
 	UNREFERENCED_PARAMETER(dwSelectedItem);
 
-	log.Write("RdpCredential::SetComboBoxSelectedValue");
+	g_log.Write("RdpCredential::SetComboBoxSelectedValue");
 
 	return E_NOTIMPL;
 }
@@ -320,7 +423,7 @@ HRESULT RdpCredential::CommandLinkClicked(DWORD dwFieldID)
 {
 	UNREFERENCED_PARAMETER(dwFieldID);
 
-	log.Write("RdpCredential::CommandLinkClicked");
+	g_log.Write("RdpCredential::CommandLinkClicked");
 
 	return E_NOTIMPL;
 }
@@ -329,15 +432,42 @@ HRESULT RdpCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RE
 	CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, PWSTR* ppwszOptionalStatusText,
 	CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-	HRESULT hr;
+	HRESULT hr = S_OK;
 
 	UNREFERENCED_PARAMETER(ppwszOptionalStatusText);
 	UNREFERENCED_PARAMETER(pcpsiOptionalStatusIcon);
 
-	log.Write("RdpCredential::GetSerialization");
+	g_log.Write("RdpCredential::GetSerialization");
 
-	if (pwszDomain && (!wcscmp(pwszDomain, L".")))
+	// Handle domain field - if empty or null, use local computer name for local logon
+	if (!pwszDomain || wcslen(pwszDomain) == 0)
 	{
+		g_log.Write("DEBUG: Domain is empty, using local computer name");
+		WCHAR wsz[MAX_COMPUTERNAME_LENGTH + 1];
+		DWORD cch = ARRAYSIZE(wsz);
+
+		if (GetComputerNameW(wsz, &cch))
+		{
+			if (pwszDomain)
+			{
+				CoTaskMemFree(pwszDomain);
+			}
+			hr = SHStrDupW(wsz, &pwszDomain);
+			g_log.Write("DEBUG: Set domain to computer name: %ws", pwszDomain);
+		}
+		else
+		{
+			g_log.Write("ERROR: Failed to get computer name, using '.' for local domain");
+			if (pwszDomain)
+			{
+				CoTaskMemFree(pwszDomain);
+			}
+			hr = SHStrDupW(L".", &pwszDomain);
+		}
+	}
+	else if (!wcscmp(pwszDomain, L"."))
+	{
+		// Original logic for explicit "." domain
 		WCHAR wsz[MAX_COMPUTERNAME_LENGTH + 1];
 		DWORD cch = ARRAYSIZE(wsz);
 
@@ -361,13 +491,19 @@ HRESULT RdpCredential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RE
 
 		PWSTR pwszUserName = _rgFieldStrings[SFI_USERNAME];
 
+		// Add detailed logging before attempting logon
+		g_log.Write("DEBUG: GetSerialization preparing logon - Username: %ws, Domain: %ws, Password length: %zu", 
+			pwszUserName ? pwszUserName : L"NULL",
+			pwszDomain ? pwszDomain : L"NULL",
+			_rgFieldStrings[SFI_PASSWORD] ? wcslen(_rgFieldStrings[SFI_PASSWORD]) : 0);
+
 		char* pszUserName = NULL;
 		char* pszDomain = NULL;
 
 		ConvertFromUnicode(CP_UTF8, 0, pwszUserName, -1, &pszUserName, 0, NULL, NULL);
 		ConvertFromUnicode(CP_UTF8, 0, pwszDomain, -1, &pszDomain, 0, NULL, NULL);
 
-		log.Write("KerbInteractiveUnlockLogonInit: UserName: '%s' Domain: '%s'", pszUserName, pszDomain);
+		g_log.Write("KerbInteractiveUnlockLogonInit: UserName: '%s' Domain: '%s'", pszUserName, pszDomain);
 
 		hr = KerbInteractiveUnlockLogonInit(pwszDomain, pwszUserName, pwzProtectedPassword, _cpus, &kiul);
 
@@ -417,7 +553,7 @@ HRESULT RdpCredential::ReportResult(NTSTATUS ntsStatus, NTSTATUS ntsSubstatus,
 
 	DWORD dwStatusInfo = (DWORD)-1;
 
-	log.Write("RdpCredential::ReportResult");
+	g_log.Write("RdpCredential::ReportResult");
 
 	for (DWORD i = 0; i < ARRAYSIZE(s_rgLogonStatusInfo); i++)
 	{
