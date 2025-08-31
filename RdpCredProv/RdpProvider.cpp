@@ -622,11 +622,9 @@ void RdpProvider::_CheckForIncomingMessages()
 			return;
 		}
 	}
-	
 	// Ensure null termination
 	buffer.push_back('\0');
 
-	buffer[bytesRead] = '\0';
 	g_log.Write("Received message from desktop client: %s", buffer.data());
 
 	// Parse the trigger login message using proper JSON parsing
