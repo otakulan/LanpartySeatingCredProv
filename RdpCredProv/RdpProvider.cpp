@@ -836,16 +836,22 @@ std::shared_ptr<StoredCredentials> RdpProvider::GetStoredCredentials() const
 std::wstring RdpProvider::toWideString(std::string_view str) const {
 	size_t size = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), NULL, 0);
 	if (size == 0) {
-		// Conversion failed or empty string
-		return std::wstring();
+		DWORD error = GetLastError();
+		g_log.Write("ERROR: Failed to calculate buffer size for UTF-8 to UTF-16 conversion. Input length: %zu, Error: %d", str.size(), error);
+		return L"this shit is broken";
 	}
 	
 	std::wstring wstr(size, L'\0'); // Preallocate size
 	size_t converted = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), wstr.data(), static_cast<int>(size));
 	
 	if (converted == 0) {
-		// Conversion failed
-		return std::wstring();
+		DWORD error = GetLastError();
+		g_log.Write("ERROR: Failed to convert UTF-8 string to UTF-16. Input length: %zu, Expected output size: %zu, Error: %d", str.size(), size, error);
+		return L"this shit is broken";
+	}
+
+	if (converted != size) {
+		g_log.Write("WARNING: UTF-8 to UTF-16 conversion size mismatch. Expected: %zu, Actual: %zu", size, converted);
 	}
 	
 	return wstr;
